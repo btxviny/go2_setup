@@ -8,9 +8,20 @@
 # docker-compose.yml -- NOT lost when the container stops/is recreated).
 #
 # Topics recorded:
-#   /camera/camera/color/image_raw        sensor_msgs/msg/Image
-#   /camera/camera/depth/image_rect_raw   sensor_msgs/msg/Image
-#   /rslidar_points                       sensor_msgs/msg/PointCloud2
+#   /camera/camera/color/image_raw/compressed   sensor_msgs/msg/CompressedImage
+#   /camera/camera/depth/image_rect_raw         sensor_msgs/msg/Image
+#   /rslidar_points                             sensor_msgs/msg/PointCloud2
+#
+# Color is recorded via compressed transport (much smaller, same ~30Hz rate as
+# raw -- cheap to encode). Depth stays RAW, deliberately -- its compressed
+# transport (compressedDepth) was tried and confirmed to make things WORSE,
+# not better: subscribing to it drags the RAW depth topic down too, from its
+# normal ~24-28Hz to the same ~0.7Hz as compressedDepth itself (PNG-encoding
+# 16-bit depth data is apparently too CPU-expensive on this hardware, and
+# throttles the driver's whole depth pipeline, not just the compressed
+# subscriber). There is no way to get full-rate raw depth AND compressedDepth
+# simultaneously on this hardware -- don't re-add compressedDepth without
+# expecting that tradeoff.
 #
 # Usage (on the dock):
 #   cd ~/realsense_humble_docker
@@ -31,7 +42,7 @@ set -euo pipefail
 
 CONTAINER="go2-realsense-humble"
 TOPICS=(
-  /camera/camera/color/image_raw
+  /camera/camera/color/image_raw/compressed
   /camera/camera/depth/image_rect_raw
   /rslidar_points
 )

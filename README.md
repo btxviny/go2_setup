@@ -298,7 +298,7 @@ build or run it).
 | Topic | Type | Notes |
 |---|---|---|
 | `/camera/camera/color/image_raw` | `sensor_msgs/msg/Image` | Doubled `camera/camera` namespace is `realsense-ros`'s default `camera_name = camera_namespace = "camera"` on this branch. |
-| `/camera/camera/color/image_raw/compressed` | `sensor_msgs/msg/CompressedImage` | Used by RViz instead of raw color — see Section 9's prerequisites. |
+| `/camera/camera/color/image_raw/compressed` | `sensor_msgs/msg/CompressedImage` | Used by RViz for live viewing (Section 9) and recorded by `record_sensors_bag.sh` (Section 10) instead of raw color — same ~30Hz rate, much smaller. |
 | `/camera/camera/depth/image_rect_raw` | `sensor_msgs/msg/Image` | |
 | `/camera/camera/color/camera_info`, `/camera/camera/depth/camera_info` | `sensor_msgs/msg/CameraInfo` | |
 | `/rslidar_points` | `sensor_msgs/msg/PointCloud2` | Hesai, decoded cloud, `frame_id: rslidar` (`publish_type:=both`). |
@@ -457,8 +457,19 @@ records the three core sensor topics to a rosbag2 bag, saved on the **dock's**
 own filesystem (not lost when the container restarts). Runs on the dock, not
 the PC.
 
-Topics recorded: `/camera/camera/color/image_raw`,
+Topics recorded: `/camera/camera/color/image_raw/compressed`,
 `/camera/camera/depth/image_rect_raw`, `/rslidar_points`.
+
+**Color is recorded compressed** (JPEG via `image_transport`) — same ~30Hz
+rate as raw, much smaller bag, no downside. **Depth is recorded raw,
+deliberately** — its compressed transport (`compressedDepth`) was tried and
+confirmed to make things *worse*, not better: subscribing to it drags the
+**raw** depth topic down too, from its normal ~24-28Hz to the same **~0.7Hz**
+as `compressedDepth` itself (PNG-encoding 16-bit depth data is apparently too
+CPU-expensive on this hardware, and throttles the driver's whole depth
+pipeline, not just the compressed subscriber). There's no way to get
+full-rate raw depth *and* `compressedDepth` simultaneously on this hardware
+— don't re-add `compressedDepth` without expecting that tradeoff.
 
 ### Why record from inside the container, not the dock's native ROS2?
 
@@ -503,7 +514,7 @@ this the bag would be root-owned and undeletable by the `unitree` user.
 docker exec -it go2-realsense-humble bash -c \
   "source /opt/ros/humble/install/setup.bash && source /opt/realsense_ws/install/setup.bash && \
    ros2 bag record -o /rosbags/my_bag \
-     /camera/camera/color/image_raw /camera/camera/depth/image_rect_raw /rslidar_points"
+     /camera/camera/color/image_raw/compressed /camera/camera/depth/image_rect_raw /rslidar_points"
 
 # Fix ownership so the unitree user can manage/delete it without sudo:
 docker exec go2-realsense-humble chown -R $(id -u):$(id -g) /rosbags/my_bag
@@ -532,36 +543,76 @@ timestamped, e.g. `sensors_20260911_142530`).
 Unlike recording (which must happen inside the container — see above),
 **playback runs entirely on this PC**, no dock or container involved at all:
 the bag only contains standard `sensor_msgs` topics, which this PC's own
-`ros-humble-desktop` install already has everything needed for. Two
-terminals, both on the PC:
+`ros-humble-desktop` install already has everything needed for.
 
-(PC, terminal 1 — play the bag; use the actual path you `scp`'d it to)
+**[`tools/play_and_visualize_bag.sh`](tools/play_and_visualize_bag.sh)**
+does it all in one command:
+
+(PC)
 ```bash
-source /opt/ros/humble/setup.bash
-export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-ros2 bag play /path/to/my_bag     # add --loop to repeat continuously
+cd ~/go2_guide_docs/tools
+./play_and_visualize_bag.sh /path/to/my_bag              # 0.5x speed (default)
+./play_and_visualize_bag.sh /path/to/my_bag -r 1.0        # real-time
 ```
 
-(PC, terminal 2 — visualize it; run from the repo root, or use the full path)
+What it does:
+- Plays the bag on an **isolated `ROS_DOMAIN_ID` (default `99`, override with
+  `-d`)** — this matters, not just tidiness: if the `go2-realsense-humble`
+  container happens to be running at the same time (it broadcasts on domain
+  0 network-wide via `network_mode: host`), playing back on the default
+  domain means RViz sees the **live** container's data *and* the bag
+  player's data on the same topic names simultaneously — you'd end up
+  watching a live feed instead of your recording, with no error or warning
+  that it happened. `99` is just a convention — any domain ID not already
+  used elsewhere in this project works (0 is the robot/live domain, 42 is
+  the live-viewing bridge's domain — Section 9).
+- **Plays at half speed by default** (`-r 0.5`, override with `-r`) — the
+  lidar point cloud (tens of thousands of points/message) and raw depth are
+  genuinely heavy for RViz to render; there's no cheap point-cloud
+  downsampling tool installed on this PC (`ros-humble-pcl-ros` would add
+  proper voxel-grid downsampling, but needs `sudo`, not installed), so
+  slower-than-real-time playback is the practical way to ease the load
+  instead. Use `-r 1.0` if your machine keeps up fine at full speed.
+- Auto-launches RViz2 with
+  [`tools/go2_sensors_playback.rviz`](tools/go2_sensors_playback.rviz).
+- Cleans up both processes reliably on exit (Ctrl+C, or closing the RViz2
+  window) — backgrounds both the player and RViz2 and waits on either one
+  exiting, rather than blocking on RViz2 in the foreground, specifically
+  because RViz2 has been observed to occasionally hang or crash on shutdown
+  in testing; a foreground wait would leave the bag player orphaned in that
+  case.
+
+### Manually (without the script)
+
+Same effect, two terminals, both on the PC — useful if you want a different
+`ROS_DOMAIN_ID`/rate combination than the script's flags allow, or just to
+see each piece separately:
+
+(PC, terminal 1 — play the bag)
 ```bash
 source /opt/ros/humble/setup.bash
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export ROS_DOMAIN_ID=99
+ros2 bag play --rate 0.5 /path/to/my_bag     # add --loop to repeat continuously
+```
+
+(PC, terminal 2 — visualize it)
+```bash
+source /opt/ros/humble/setup.bash
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export ROS_DOMAIN_ID=99
 rviz2 -d ~/go2_guide_docs/tools/go2_sensors_playback.rviz
 ```
 
-Uses a **separate** RViz config,
-[`tools/go2_sensors_playback.rviz`](tools/go2_sensors_playback.rviz) — not
-`go2_sensors_docker.rviz` (Section 9's live-viewing config). The only
-difference: `RealSenseColor` points at the raw
-`/camera/camera/color/image_raw` topic instead of the `/compressed` one,
-since `record_sensors_bag.sh` only records the raw topic (see the recorded
-topic list above) — the compressed variant only exists for reducing
-bandwidth over the live bridged link (Section 9), which doesn't apply here
-since playback and RViz are both local to this one PC.
+Both terminals must use the **same** `ROS_DOMAIN_ID` as each other, or RViz
+won't see the playback data either.
 
-No `ROS_DOMAIN_ID`/`CYCLONEDDS_URI` overrides, `domain_bridge`, or dock
-connection needed — playback is fully self-contained and never touches the
-robot's network at all.
+`go2_sensors_playback.rviz` is a **separate** config from
+`go2_sensors_docker.rviz` (Section 9's live-viewing one) — both point
+`RealSenseColor` at the compressed topic and `RealSenseDepth` at raw depth
+(matching what's actually recorded), the real difference being which
+`ROS_DOMAIN_ID` each is meant for (playback's isolated `99` vs. the live
+bridge's `42`).
 
 ## 11. Verifying Data on the PC Side
 
@@ -639,7 +690,8 @@ tools/
   launch_all_sensors_docker.sh        — one-shot script: docker compose up -d + domain_bridge + RViz2, --ethernet (default) or --wifi (Section 9)
   bridge_docker.yaml                  — domain_bridge whitelist for the script above (RealSense + Hesai topics)
   go2_sensors_docker.rviz             — RViz2 layout for the script above (Fixed Frame: rslidar)
-  go2_sensors_playback.rviz           — RViz2 layout for local rosbag playback (Section 10) -- same as above but RealSenseColor uses the raw topic, since bags only record raw
+  go2_sensors_playback.rviz           — RViz2 layout for local rosbag playback (Section 10), for isolated ROS_DOMAIN_ID 99 (vs. 42 for the live config above)
+  play_and_visualize_bag.sh           — one-shot script: ros2 bag play (isolated domain, half-speed default) + auto-launch RViz2 (Section 10)
   dds_probe.c / dds_probe             — standalone DDS participant/topic enumerator (no SDK dependency); used to confirm the --wifi multicast limitation (Section 9)
   raw_mcast_rx.c / raw_mcast_rx       — bare UDP multicast receiver (bypasses DDS entirely, for diagnosing netfilter issues)
   probe_cyclonedds.xml                — Cyclone config for the probes above (domain-any, binds to Ethernet iface)
@@ -656,3 +708,4 @@ tools/
 - [`tools/launch_all_sensors_docker.sh`](tools/launch_all_sensors_docker.sh) — one-shot script: RealSense + Hesai → RViz2 (Section 9)
 - [`realsense_humble_docker/record_sensors_bag.sh`](realsense_humble_docker/record_sensors_bag.sh) — records RealSense + Hesai to a rosbag2 bag on the dock (Section 10)
 - [`tools/go2_sensors_playback.rviz`](tools/go2_sensors_playback.rviz) — RViz2 layout for local rosbag playback (Section 10)
+- [`tools/play_and_visualize_bag.sh`](tools/play_and_visualize_bag.sh) — one-shot script: play a bag + auto-launch RViz2 (Section 10)

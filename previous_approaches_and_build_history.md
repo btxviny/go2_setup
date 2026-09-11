@@ -354,3 +354,94 @@ type-support/introspection metadata, not a QoS or topic-name issue.
 Recording has to use the matching distro's tooling, so `record_sensors_bag.sh`
 correctly stays as-is: `docker exec` into the container, `chown` the result
 back to `unitree` afterward.
+
+### 17. Rosbag playback showing live data instead of the recording
+The first version of the playback instructions (Section 10) didn't set
+`ROS_DOMAIN_ID` for either `ros2 bag play` or `rviz2`, leaving both on the
+default domain 0 -- the same domain the `go2-realsense-humble` container
+broadcasts on network-wide (via `network_mode: host`) whenever it's running.
+Result: RViz subscribed to both the live container's publishers and the bag
+player's publishers on the same topic names at once, with no error or
+warning -- it just silently showed the live feed instead of (or mixed with)
+the recording. Fixed by isolating playback onto its own dedicated
+`ROS_DOMAIN_ID` (`99`, an arbitrary value not used anywhere else in this
+project -- 0 is the robot/live domain, 42 is the live-viewing bridge's
+domain) on both the player and RViz.
+
+### 18. Recording switched to compressed color; compressedDepth found unusable
+Following item 17's fix, the recording pipeline itself was changed to record
+`/camera/camera/color/image_raw/compressed` instead of raw color -- same
+~30Hz rate (JPEG encoding is cheap), much smaller bag, and it sidesteps the
+"laggy in RViz" symptom during playback entirely (same root cause as the
+live-viewing fix in item 13: raw 1280x720 at ~30Hz is a lot of data for
+RViz/rosbag2 to push through, regardless of whether the source is live or a
+local file).
+
+Depth was also tested with its compressed transport (`compressedDepth`)
+before deciding against it: confirmed via `ros2 topic hz` that it only
+publishes at **~0.7Hz** on this hardware, vs. ~24-28Hz for raw depth --
+PNG-encoding 16-bit depth data is apparently too CPU-expensive on this
+Jetson to keep up. Recording depth via `compressedDepth` would silently
+lose ~97% of depth frames. Depth stays raw in the recording; only color
+uses compressed transport. `record_sensors_bag.sh`, its standalone
+commands, and `tools/go2_sensors_playback.rviz` were all updated to match
+(and pushed to the dock).
+
+Verified the whole pipeline end-to-end after the change: recorded a fresh
+test bag with the new topic list, confirmed message counts/rates via
+`ros2 bag info` and `ros2 topic hz` during playback, and confirmed
+`go2_sensors_playback.rviz` loads without error against it.
+
+### 19. `play_and_visualize_bag.sh` created; a real RViz2 shutdown-hang bug found and fixed along the way
+`tools/play_and_visualize_bag.sh` was added to combine bag playback +
+auto-launched RViz2 into one command, defaulting to half-speed playback
+(`-r 0.5`) to ease the lidar/RViz render load (no point-cloud
+voxel-downsampling tool is installed on this PC -- `ros-humble-pcl-ros`
+would add one, but needs `sudo`), and always isolating onto its own
+`ROS_DOMAIN_ID` (default `99`) per item 17's fix.
+
+First version ran RViz2 as a blocking foreground command with the bag player
+backgrounded behind it. Testing found this was fragile: RViz2 was observed
+to sometimes hang indefinitely after receiving SIGINT rather than exiting
+(no crash, just stuck in state `Sl`), and separately, on another run, to
+abort with `rviz2: tpp.c:83: __pthread_tpp_change_priority: Assertion ...
+failed` (an internal Qt/pthread issue, unrelated to this script). In the
+hang case specifically, a foreground `rviz2 ...` as the script's last
+command meant bash was blocked inside that exec and could never reach the
+cleanup trap -- the bag player would be orphaned. Fixed by backgrounding
+*both* processes and using `wait -n "$PLAYER_PID" "$RVIZ_PID"`, matching the
+pattern already used in `realsense_humble_docker/start.sh` on the dock --
+either process exiting (cleanly, hung-then-killed, or crashed) now reliably
+reaches the cleanup trap, which kills both (with a `kill` then `kill -9`
+grace-period fallback). Verified after the fix: intentionally triggered the
+same abort-on-shutdown case again and confirmed cleanup still left no
+orphaned processes.
+
+### 20. Adding compressedDepth to the recording regressed raw depth too
+After a later request to also record `compressedDepth` (in addition to raw
+depth, not instead of it), testing revealed this isn't a free additional
+stream: subscribing to `compressedDepth` drags the **raw** depth topic down
+to the same **~0.7Hz** as `compressedDepth` itself, from its normal
+~24-28Hz. Confirmed via a real recording and `ros2 bag info`: both
+`/camera/camera/depth/image_rect_raw` and its `/compressedDepth` sibling
+showed exactly 10 messages in the same 14.27s window, vs. 421 for color and
+143 for lidar in that same window. Subscribing anything to the
+`compressedDepth` transport appears to throttle the driver's entire depth
+publish pipeline on this hardware, not just the compressed subscriber's own
+rate.
+
+Presented this finding and asked how to proceed; the user chose to accept
+the tradeoff and keep `compressedDepth` in the recording anyway, understanding
+that means **both** depth streams end up sparse (~0.7Hz) rather than getting
+a full-rate raw stream plus a bonus low-rate compressed one.
+`record_sensors_bag.sh`'s header comment and README.md Section 10 were
+corrected to state this plainly (the first version, written before this was
+discovered, incorrectly claimed raw depth would stay at full rate).
+
+### 21. Reverted item 20 -- compressedDepth removed from the recording
+After actually using the `compressedDepth`-included recording, both lidar
+and depth looked bad in RViz -- reverted back to the confirmed-working
+3-topic version (compressed color + raw depth + lidar) from before item 20.
+`record_sensors_bag.sh` (local and dock, confirmed identical via `diff`
+after pushing), README.md Section 10, and the standalone recording command
+were all reverted to match.

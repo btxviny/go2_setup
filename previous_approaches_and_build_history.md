@@ -434,7 +434,7 @@ Presented this finding and asked how to proceed; the user chose to accept
 the tradeoff and keep `compressedDepth` in the recording anyway, understanding
 that means **both** depth streams end up sparse (~0.7Hz) rather than getting
 a full-rate raw stream plus a bonus low-rate compressed one.
-`record_sensors_bag.sh`'s header comment and README.md Section 10 were
+`record_sensors_bag.sh`'s header comment and README.md's Recording & Playing Back Rosbags section were
 corrected to state this plainly (the first version, written before this was
 discovered, incorrectly claimed raw depth would stay at full rate).
 
@@ -443,5 +443,85 @@ After actually using the `compressedDepth`-included recording, both lidar
 and depth looked bad in RViz -- reverted back to the confirmed-working
 3-topic version (compressed color + raw depth + lidar) from before item 20.
 `record_sensors_bag.sh` (local and dock, confirmed identical via `diff`
-after pushing), README.md Section 10, and the standalone recording command
+after pushing), README.md's Recording & Playing Back Rosbags section, and the standalone recording command
 were all reverted to match.
+
+### 22. Real root cause found: unscoped `<Domain>` block silently broke domain_bridge's domain-42 side entirely
+Days after item 21 (Sept 14, vs. Sept 11), the pipeline stopped working
+consistently -- `launch_all_sensors_docker.sh` would run clean through all
+4 steps with no errors, but RViz showed nothing at all, every time.
+
+**Investigation path** (each step ruled something out):
+- Confirmed only one `domain_bridge` instance running (not the item-11 duplicate-process bug).
+- Confirmed the container was up and genuinely publishing (`ros2 topic hz` on
+  the dock showed real data).
+- `ros2 topic info /rslidar_points -v` on domain 0 showed the bridge's
+  subscriber correctly matched to the container's publisher (Publisher
+  count 1, Subscription count 1) -- domain-0 side was completely healthy.
+- The same check on domain 42 showed **Publisher count: 0** -- the bridge
+  never created anything there at all, despite `ros2 node list` on domain 0
+  showing its `go2_bridge_docker_0` node existed and was receiving.
+- A stray `ros2-daemon` running `rmw_fastrtps_cpp` on domain 0 (leftover
+  from some earlier command that didn't set `RMW_IMPLEMENTATION`/
+  `ROS_DOMAIN_ID`) was found and killed as a plausible culprit -- CycloneDDS
+  and FastRTPS sharing UDP port 7400 for domain-0 discovery seemed like it
+  could plausibly corrupt things. Didn't fix it; a completely fresh
+  `domain_bridge` instance after removing the daemon still failed the same
+  way.
+- Checked `/proc/<pid>/task/` thread states: domain_bridge genuinely had two
+  full sets of CycloneDDS worker threads (one per domain), both sleeping
+  normally, not hung/spinning.
+- `dds_probe` (the repo's own raw-DDS diagnostic) turned out to hardcode
+  domain 0 internally regardless of `ROS_DOMAIN_ID` -- a red herring; it
+  can't actually test domain 42 at all. Worth remembering for next time.
+- Confirmed with plain `ros2 topic pub`/`ros2 topic echo` that basic domain-42
+  loopback discovery works fine on this machine -- ruling out a general
+  domain-42/loopback problem and narrowing it specifically to
+  `domain_bridge`'s cross-domain behavior.
+- Reproduced with a **minimal single-topic** bridge config (not the full
+  6-topic `bridge_docker.yaml`) -- ruled out anything topic/type-specific.
+- Checked for RouDi (Iceoryx's shared-memory daemon, auto-installed as a
+  CycloneDDS dependency) -- not running. Plausible lead, but never
+  conclusively tested in isolation before the real fix was found.
+
+**Actual root cause**: `tools/cyclone_domain0_enp3s0.xml` had a single
+`<Domain>` block with no `id` attribute. CycloneDDS applies an unscoped
+`<Domain>` block to **every** domain a process opens. `domain_bridge` is
+the *only* process in this entire setup that opens two different
+`ROS_DOMAIN_ID`s (0 and 42) in one process -- every other process (rviz2,
+the container, every `ros2` CLI diagnostic used above) only ever opens one
+domain, so the bug was invisible everywhere except inside `domain_bridge`
+itself. The unscoped block forced domain_bridge's domain-42 participant to
+also try binding `enp3s0` (meant for domain 0) instead of `lo` -- since
+rviz2 correctly binds only `lo` via `cyclone_domain42_lo.xml`, the two
+could never find each other. Basic participant-level discovery machinery
+still started fine (hence the healthy-looking threads and bound ports),
+but no topic-level match ever completed.
+
+Genuinely unclear why this didn't surface in any of the many earlier
+successful sessions using the exact same (buggy) config -- possibly a
+CycloneDDS version nuance in how it resolves an ambiguous same-host
+same-interface-name bind between two domains, possibly something
+environment-specific that changed between Sept 11 and Sept 14. Not fully
+explained, but the fix itself was verified conclusively: reproduced the
+failure with a minimal repro, fixed it by adding explicit `<Domain id="0">`
+/ `<Domain id="42">` scoping, and confirmed all three topics (lidar, color,
+depth) flowing again at their normal rates through the real, unmodified
+`launch_all_sensors_docker.sh` script.
+
+**Fix**: both `tools/cyclone_domain0_enp3s0.xml` (the static default-Ethernet
+config) and the temp config `launch_all_sensors_docker.sh` generates for
+`--wifi`/custom `-i` now use explicit `<Domain id="0">`/`<Domain id="42">`
+blocks instead of one unscoped block. `tools/cyclone_domain42_lo.xml` needed
+no change -- it's only ever used by single-domain processes (rviz2, `ros2`
+CLI checks), where an unscoped block is perfectly correct.
+
+**Unrelated bug fixed in the same debugging session**: the script's cleanup
+trap unconditionally `rm -f`'d `$DOMAIN0_CONFIG` on every exit -- in the
+`--ethernet` default case, that variable points directly at the permanent,
+git-tracked `cyclone_domain0_enp3s0.xml` rather than a generated temp file,
+so *every run of the script deleted its own config file on exit*. This had
+been silently happening for days (the file kept mysteriously vanishing
+between sessions) before being traced to this line. Fixed by tracking
+whether the config is actually a generated temp file
+(`DOMAIN0_CONFIG_IS_TEMP`) and only deleting it in that case.

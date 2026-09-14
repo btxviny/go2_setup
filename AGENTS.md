@@ -41,7 +41,7 @@ ssh -i ~/.ssh/id_ed25519 unitree@192.168.123.18 "ip -br addr show wlan0"   # or 
 WiFi is on the `192.168.10.0/24` subnet (`Cudy-17B9`); IP was
 `192.168.10.89/24` when set up — DHCP-assigned, so it can change; don't
 hardcode it anywhere without re-checking (use `ubuntu.local` instead).
-Full setup/troubleshooting walkthrough: README.md Section 5.
+Full setup/troubleshooting walkthrough: networking.md.
 
 **`unitree`'s sudo password is the same as their SSH password (`123`)** —
 needed for anything network-config related (`nmcli device wifi connect`,
@@ -103,7 +103,7 @@ Run these one-per-line or joined with `;` — **never with commas** (bash treats
 
 ### Isolated (domain 0 → 42) method via `domain_bridge`
 
-Recommended for regular/permanent use so the PC's own ROS2 tools (RViz, rqt, shell experiments) don't pollute the robot's DDS domain 0 discovery. This is what `tools/launch_all_sensors_docker.sh` automates — see README.md Section 9 for the full walkthrough, and `tools/bridge_docker.yaml` / `tools/cyclone_domain0_enp3s0.xml` / `tools/cyclone_domain42_lo.xml` for the actual config.
+Recommended for regular/permanent use so the PC's own ROS2 tools (RViz, rqt, shell experiments) don't pollute the robot's DDS domain 0 discovery. This is what `tools/launch_all_sensors_docker.sh` automates — see README.md's Launching section for the full walkthrough, and `tools/bridge_docker.yaml` / `tools/cyclone_domain0_enp3s0.xml` / `tools/cyclone_domain42_lo.xml` for the actual config.
 
 ### Common shell pitfalls hit in this project (don't repeat)
 
@@ -115,7 +115,8 @@ Recommended for regular/permanent use so the PC's own ROS2 tools (RViz, rqt, she
 ## Repo layout (`~/go2_guide_docs/`)
 
 ```
-README.md                                — main setup guide, current (Docker/Humble) approach
+README.md                                — high-level setup guide, current (Docker/Humble) approach
+networking.md                            — detailed connectivity: topology, credentials, Ethernet + WiFi setup, troubleshooting
 AGENTS.md                                — this file
 previous_approaches_and_build_history.md — deprecated ROS1/ros1_bridge approach + full go2-realsense-humble build debugging history
 realsense_depth_stream_fix.md            — root-cause writeup for the OLD ROS1 driver's depth-stream USB failure (historical)
@@ -123,12 +124,8 @@ go2_realsense_hesai_setup.pdf            — external reference doc
 realsense_humble_docker/                 — local mirror of ~/realsense_humble_docker/ on the dock, for version control (image must still be built ON the dock, arm64)
   Dockerfile, docker-compose.yml, start.sh, record_sensors_bag.sh, hesai_lidar_src/
 tools/
-  dds_probe.c / dds_probe             — standalone DDS participant/topic enumerator (no SDK dependency)
-  raw_mcast_rx.c / raw_mcast_rx       — bare UDP multicast receiver (bypasses DDS entirely, for diagnosing netfilter issues)
-  probe_cyclonedds.xml                — Cyclone config for the probes above (domain-any, binds to Ethernet iface)
-  probe_cyclonedds_trace.xml          — same + discovery tracing enabled
   go2_network_setup.sh                — scripted PC static-IP setup (nmcli persistent), ping check, UFW check/fix
-  cyclone_domain0_enp3s0.xml          — isolated-bridge Cyclone config, dock-facing side, --ethernet default (domain 0 on enp3s0); --wifi/-i generate an equivalent temp config at runtime instead
+  cyclone_domain0_enp3s0.xml          — domain_bridge's Cyclone config only (it opens both domains 0+42 in one process) -- explicit <Domain id="0">/<Domain id="42"> blocks, --ethernet default; --wifi/-i generate an equivalent temp config. An unscoped <Domain> block here previously broke domain-42 bridging entirely -- see previous_approaches_and_build_history.md item 22.
   cyclone_domain42_lo.xml             — isolated-bridge Cyclone config, RViz-facing side (domain 42 on loopback -- always, regardless of --ethernet/--wifi)
   launch_all_sensors_docker.sh        — docker compose up -d on the dock (go2-realsense-humble, RealSense + Hesai as native ROS2 Humble, domain 0), domain_bridge (0 -> 42) + RViz2. --ethernet (default) or --wifi. L1 LiDAR deliberately not bridged (RealSense + Hesai only).
   bridge_docker.yaml                  — domain_bridge whitelist for launch_all_sensors_docker.sh (RealSense color/depth/camera_info incl. compressed color + /rslidar_points; everything lives on domain 0 via the container's host networking)
@@ -184,10 +181,29 @@ Decision: built `realsense-ros` + `librealsense2` from source inside a Docker co
    regardless of bound interface) but wrong; fixed to bind to `lo`.
 7. **`--wifi` mode's live RViz data doesn't work on the current WiFi network**
    (SSH/`docker compose`/recording all work fine over it though) — confirmed
-   via `tools/dds_probe` that DDS multicast discovery doesn't reach across
-   this WiFi network at all (0 participants found over WiFi vs. instant over
-   Ethernet). Almost certainly the router's AP/client isolation setting,
-   not a script bug. User is checking router admin settings rather than
-   pursuing a unicast-peers CycloneDDS workaround (rejected as too fragile,
-   given both the container's and PC's WiFi IPs are independently
-   DHCP-assigned).
+   via a one-off DDS discovery probe (since removed as no longer needed) that
+   DDS multicast discovery doesn't reach across this WiFi network at all (0
+   participants found over WiFi vs. instant over Ethernet). Almost certainly
+   the router's AP/client isolation setting, not a script bug. User is
+   checking router admin settings rather than pursuing a unicast-peers
+   CycloneDDS workaround (rejected as too fragile, given both the
+   container's and PC's WiFi IPs are independently DHCP-assigned). Note:
+   that probe hardcoded domain 0 internally regardless
+   of `ROS_DOMAIN_ID` — can't be used to test domain 42 directly.
+8. **RESOLVED (Sept 14): `launch_all_sensors_docker.sh`'s cleanup trap was
+   deleting the permanent `tools/cyclone_domain0_enp3s0.xml` on every single
+   run** (in `--ethernet` mode, `$DOMAIN0_CONFIG` pointed straight at that
+   file rather than a temp copy, and cleanup unconditionally `rm -f`'d it).
+   This is why the file kept mysteriously vanishing between sessions for
+   days. Fixed by tracking whether the config is actually a generated temp
+   file before deleting it.
+9. **RESOLVED (Sept 14): domain_bridge's domain-42 side was silently
+   broken entirely** — an unscoped `<Domain>` block in
+   `cyclone_domain0_enp3s0.xml` applied to *both* domains domain_bridge
+   opens (it's the only process here that opens two), forcing its domain-42
+   participant to also bind `enp3s0` instead of `lo`, so it could never
+   discover rviz2. Extensive live debugging (stray FastRTPS daemon on
+   domain 0, thread-state inspection, minimal single-topic repro, plain
+   pub/sub sanity check) before finding it. Fixed with explicit
+   `<Domain id="0">`/`<Domain id="42">` scoping. Full writeup:
+   `previous_approaches_and_build_history.md` item 22.

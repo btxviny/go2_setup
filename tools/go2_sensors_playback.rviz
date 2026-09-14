@@ -1,4 +1,11 @@
-Panels: []
+Panels:
+  - Class: rviz_common/Displays
+    Help Height: 138
+    Name: Displays
+    Property Tree Widget:
+      Expanded: ~
+      Splitter Ratio: 0.5
+    Tree Height: 549
 Visualization Manager:
   Class: ""
   Displays:

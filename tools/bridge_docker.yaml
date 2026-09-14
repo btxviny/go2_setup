@@ -5,15 +5,29 @@ name: go2_bridge_docker
 # domain 0 and need to be bridged onto the isolated domain 42 here. The
 # built-in L1 LiDAR (/utlidar/cloud) is deliberately not included -- this
 # setup only cares about RealSense + Hesai.
+#
+# Color is bridged compressed only (raw color deliberately NOT bridged --
+# saves bandwidth, RViz already only consumes the compressed transport).
+# Depth is bridged raw, deliberately -- its compressedDepth transport was
+# tested and found to run at only ~0.7Hz (PNG depth encoding is slow on this
+# hardware), so it's not worth the bandwidth savings for live viewing. See
+# record_sensors_bag.sh for the same finding in the recording context.
+#
+# Depth and lidar are forced to best_effort QoS (domain_bridge defaults to
+# mirroring the source's reliability, which for these is RELIABLE). Found
+# live: with large multi-fragment messages like raw depth (~1.8MB/frame) and
+# the point cloud sent Reliable over the real network hop (container -> PC),
+# a single dropped UDP fragment makes CycloneDDS retry that exact sample
+# before delivering anything newer -- RViz then shows a frozen last frame
+# instead of just skipping the bad one. Color is small enough (compressed
+# JPEG, fits in a few packets) that this never bit it, so it's left alone.
 topics:
   /rslidar_points:
     type: sensor_msgs/msg/PointCloud2
     from_domain: 0
     to_domain: 42
-  /camera/camera/color/image_raw:
-    type: sensor_msgs/msg/Image
-    from_domain: 0
-    to_domain: 42
+    qos:
+      reliability: best_effort
   /camera/camera/color/image_raw/compressed:
     type: sensor_msgs/msg/CompressedImage
     from_domain: 0
@@ -26,6 +40,8 @@ topics:
     type: sensor_msgs/msg/Image
     from_domain: 0
     to_domain: 42
+    qos:
+      reliability: best_effort
   /camera/camera/depth/camera_info:
     type: sensor_msgs/msg/CameraInfo
     from_domain: 0

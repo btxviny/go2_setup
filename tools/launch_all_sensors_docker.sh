@@ -138,6 +138,7 @@ echo
 # --- Cleanup (dock-side container + local domain_bridge + generated temp config) ---
 DOMAIN_BRIDGE_PID=""
 DOMAIN0_CONFIG=""
+DOMAIN0_CONFIG_IS_TEMP=""
 
 cleanup() {
   echo
@@ -150,7 +151,11 @@ cleanup() {
     kill "$DOMAIN_BRIDGE_PID" 2>/dev/null
   fi
   pkill -f "lib/domain_bridge/domain_bridge" 2>/dev/null
-  if [[ -n "$DOMAIN0_CONFIG" && -f "$DOMAIN0_CONFIG" ]]; then
+  # Only remove DOMAIN0_CONFIG if WE generated it as a temp file (--wifi or a
+  # custom -i). In the --ethernet default case it points at the permanent,
+  # git-tracked tools/cyclone_domain0_enp3s0.xml -- deleting that unconditionally
+  # here was a real bug that kept wiping the checked-in file on every run.
+  if [[ -n "$DOMAIN0_CONFIG_IS_TEMP" && -f "$DOMAIN0_CONFIG" ]]; then
     rm -f "$DOMAIN0_CONFIG"
   fi
   echo "Stopping the dock-side container (docker compose down)..."
@@ -191,17 +196,33 @@ fi
 # --ethernet interface (enp3s0 hardcoded in the file). For --wifi (or a
 # custom -i override), generate a temp config with the actual interface name
 # instead, rather than requiring a separate static file per possible NIC name.
+#
+# IMPORTANT: this config is passed to domain_bridge, which opens TWO domains
+# (0 and 42) in one process -- both <Domain> blocks below must use an
+# explicit id="N" attribute. An unscoped <Domain> (no id) applies to EVERY
+# domain the process opens, which silently broke domain-42 bridging entirely
+# (see the comment in tools/cyclone_domain0_enp3s0.xml for the full story).
 echo "[3/4] Starting local domain_bridge (domain 0 on $IFACE -> 42, RealSense + Hesai topics)..."
 if [[ "$MODE" == "ethernet" && "$IFACE" == "enp3s0" ]]; then
   DOMAIN0_CONFIG="$SCRIPT_DIR/cyclone_domain0_enp3s0.xml"
 else
   DOMAIN0_CONFIG="$(mktemp /tmp/cyclone_domain0_XXXXXX.xml)"
+  DOMAIN0_CONFIG_IS_TEMP=1
   cat > "$DOMAIN0_CONFIG" <<EOF
 <?xml version="1.0" encoding="UTF-8" ?>
 <CycloneDDS xmlns="https://cdds.io/config">
-  <Domain>
+  <Domain id="0">
     <General>
-      <NetworkInterfaceAddress>$IFACE</NetworkInterfaceAddress>
+      <Interfaces>
+        <NetworkInterface name="$IFACE" />
+      </Interfaces>
+    </General>
+  </Domain>
+  <Domain id="42">
+    <General>
+      <Interfaces>
+        <NetworkInterface name="lo" />
+      </Interfaces>
     </General>
   </Domain>
 </CycloneDDS>

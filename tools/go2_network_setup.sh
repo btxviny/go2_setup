@@ -154,6 +154,5 @@ fi
 
 echo
 echo "=== Done ==="
-echo "Next: run your DDS probe / unitree_sdk2 example, e.g.:"
-echo "  ~/go2_guide_docs/tools/dds_probe 10   (with CYCLONEDDS_URI pointed at $IFACE)"
-echo "  ./go2_stand_example $IFACE"
+echo "Next: launch the sensor pipeline, e.g.:"
+echo "  cd ~/go2_guide_docs/tools && ./launch_all_sensors_docker.sh"

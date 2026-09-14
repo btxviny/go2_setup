@@ -202,12 +202,58 @@ fi
 # explicit id="N" attribute. An unscoped <Domain> (no id) applies to EVERY
 # domain the process opens, which silently broke domain-42 bridging entirely
 # (see the comment in tools/cyclone_domain0_enp3s0.xml for the full story).
+#
+# --wifi also adds a unicast <Peers> entry pointing at the dock's WiFi IP,
+# plus <ParticipantIndex>none</ParticipantIndex>. Full story, confirmed live:
+#   1. This WiFi network blocks MULTICAST between wireless clients (AP/client
+#      isolation) -- CycloneDDS's normal multicast SPDP discovery gets 0
+#      participants over WiFi, instant over Ethernet. Plain unicast (ping)
+#      between the two WiFi IPs works fine, so a unicast Peer sidesteps it.
+#      The IP is looked up fresh via SSH on every run (not hardcoded) so this
+#      doesn't rot when DHCP hands out a different address next session.
+#   2. The container runs RealSense + Hesai as two separate processes (two
+#      DDS participants) -- a bare Peer address by default only reaches
+#      whichever one owns the "well-known" discovery port.
+#      ParticipantIndex=none (set BOTH here and on the container -- see
+#      realsense_humble_docker/docker-compose.yml's CYCLONEDDS_URI) changes
+#      how co-located participants share discovery ports, letting one peer
+#      reach both. It must match on both ends, confirmed empirically.
+#   3. The container's docker-compose.yml also explicitly binds both eth0 AND
+#      wlan0 (not auto-select): the dock's NIC doesn't reliably report
+#      link-down when the Ethernet cable's unplugged (still shows LOWER_UP),
+#      so auto-select can silently bind to an unreachable eth0 address.
+#   4. Even after 1-3, large Reliable-QoS messages (raw depth, the point
+#      cloud, even compressed color's JPEG frames) still never arrived --
+#      a single dropped UDP fragment makes CycloneDDS retry that exact
+#      sample forever instead of delivering anything newer. Fixed by forcing
+#      best_effort QoS on all three in tools/bridge_docker.yaml.
+# See previous_approaches_and_build_history.md for the full debugging trail
+# (including two dead-end theories that turned out to be stale `ros2 daemon`
+# cache mimicking successful discovery -- always test with --no-daemon).
 echo "[3/4] Starting local domain_bridge (domain 0 on $IFACE -> 42, RealSense + Hesai topics)..."
 if [[ "$MODE" == "ethernet" && "$IFACE" == "enp3s0" ]]; then
   DOMAIN0_CONFIG="$SCRIPT_DIR/cyclone_domain0_enp3s0.xml"
 else
   DOMAIN0_CONFIG="$(mktemp /tmp/cyclone_domain0_XXXXXX.xml)"
   DOMAIN0_CONFIG_IS_TEMP=1
+
+  PEERS_BLOCK=""
+  if [[ "$MODE" == "wifi" ]]; then
+    DOCK_WIFI_IP="$(ssh -o ConnectTimeout=5 "$DOCK_HOST" "ip -4 -br addr show wlan0 | awk '{print \$3}' | cut -d/ -f1" 2>/dev/null)"
+    if [[ -n "$DOCK_WIFI_IP" ]]; then
+      echo "  Dock WiFi IP (resolved fresh via SSH): $DOCK_WIFI_IP -- adding as a unicast discovery peer"
+      PEERS_BLOCK="    <Discovery>
+      <Peers>
+        <Peer address=\"$DOCK_WIFI_IP\" />
+      </Peers>
+      <ParticipantIndex>none</ParticipantIndex>
+    </Discovery>
+"
+    else
+      echo "  WARNING: couldn't resolve the dock's WiFi IP via SSH -- falling back to multicast-only discovery, which is known not to work on this WiFi network." >&2
+    fi
+  fi
+
   cat > "$DOMAIN0_CONFIG" <<EOF
 <?xml version="1.0" encoding="UTF-8" ?>
 <CycloneDDS xmlns="https://cdds.io/config">
@@ -217,7 +263,7 @@ else
         <NetworkInterface name="$IFACE" />
       </Interfaces>
     </General>
-  </Domain>
+${PEERS_BLOCK}  </Domain>
   <Domain id="42">
     <General>
       <Interfaces>

@@ -13,14 +13,18 @@ name: go2_bridge_docker
 # hardware), so it's not worth the bandwidth savings for live viewing. See
 # record_sensors_bag.sh for the same finding in the recording context.
 #
-# Depth and lidar are forced to best_effort QoS (domain_bridge defaults to
-# mirroring the source's reliability, which for these is RELIABLE). Found
-# live: with large multi-fragment messages like raw depth (~1.8MB/frame) and
-# the point cloud sent Reliable over the real network hop (container -> PC),
-# a single dropped UDP fragment makes CycloneDDS retry that exact sample
-# before delivering anything newer -- RViz then shows a frozen last frame
-# instead of just skipping the bad one. Color is small enough (compressed
-# JPEG, fits in a few packets) that this never bit it, so it's left alone.
+# All three sensor topics are forced to best_effort QoS (domain_bridge
+# defaults to mirroring the source's reliability, which is RELIABLE). Found
+# live: with a large multi-fragment message -- raw depth (~1.8MB/frame), the
+# point cloud, or even compressed color's JPEG frames over a lossier link --
+# sent Reliable over the real network hop (container -> PC), a single
+# dropped UDP fragment makes CycloneDDS retry that exact sample before
+# delivering anything newer, stalling the stream entirely instead of just
+# skipping the bad frame. Confirmed live over WiFi: color needed this too
+# there (higher packet loss than Ethernet, where it had never been an
+# issue) -- a raw domain-0 subscription to compressed color got ZERO
+# messages in 60s under Reliable, on the same link where a tiny best_effort
+# test topic flowed instantly.
 topics:
   /rslidar_points:
     type: sensor_msgs/msg/PointCloud2
@@ -32,6 +36,8 @@ topics:
     type: sensor_msgs/msg/CompressedImage
     from_domain: 0
     to_domain: 42
+    qos:
+      reliability: best_effort
   /camera/camera/color/camera_info:
     type: sensor_msgs/msg/CameraInfo
     from_domain: 0

@@ -216,14 +216,39 @@ ssh -i ~/.ssh/id_ed25519 unitree@ubuntu.local
 ```
 
 If you ever need the actual current IP (e.g. for `nmap` or a router admin
-page lookup), get it via the Ethernet link, or directly if you already know
-a recent WiFi IP:
+page lookup) **and the Ethernet cable isn't plugged in**, don't try to go via
+the Ethernet address — use mDNS to reach the dock first (works fine with no
+Ethernet link at all, since `ubuntu.local` resolves over WiFi directly), then
+ask the dock itself for its WiFi IP:
+
+(PC)
+```bash
+ssh -i ~/.ssh/id_ed25519 unitree@ubuntu.local "ip -br addr show wlan0"
+```
+
+If Ethernet *is* plugged in, that link works too as an alternative path to
+the same information:
 
 (PC)
 ```bash
 ssh -i ~/.ssh/id_ed25519 unitree@192.168.123.18 "ip -br addr show wlan0"   # via Ethernet
-ssh -i ~/.ssh/id_ed25519 unitree@192.168.10.89 "ip -br addr show wlan0"    # or directly, if still current
 ```
+
+**Gotcha:** `ubuntu.local` can occasionally resolve to a *stale* cached
+address (e.g. an old Ethernet IP, even with the cable unplugged) rather than
+the dock's current WiFi IP, if this PC's mDNS cache hasn't refreshed yet —
+seen live once. If `ssh unitree@ubuntu.local` times out despite the dock
+being up on WiFi, force a fresh resolve before concluding the dock is
+unreachable:
+
+(PC)
+```bash
+avahi-resolve -n ubuntu.local
+```
+If this returns a `192.168.123.x` address while Ethernet is unplugged, that's
+the stale-cache symptom, not a real connectivity problem — it typically
+self-corrects within a short wait; retry the SSH/avahi-resolve after a few
+seconds.
 
 #### Troubleshooting
 

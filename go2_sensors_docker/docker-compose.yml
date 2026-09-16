@@ -1,0 +1,23 @@
+services:
+  sensors:
+    image: go2-sensors-humble
+    container_name: go2-sensors-humble
+    restart: unless-stopped
+    network_mode: host   # required for ROS2/DDS discovery to work with the rest of the Go2 network
+    privileged: true      # simplest reliable way to give librealsense USB access to the D435i
+    volumes:
+      - /dev:/dev
+      - ./start.sh:/start.sh:ro
+      - ./config:/config:ro
+      - ~/rosbags:/rosbags
+    environment:
+      - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+      - ROS_DOMAIN_ID=0   # matches the robot's DDS domain (see AGENTS.md) -- change if you want it isolated
+      # Empty by default (multicast discovery works fine on the robot's own
+      # Ethernet subnet). launch_all_sensors_docker.sh --wifi sets this to
+      # file:///config/cyclonedds_wifi_discovery.xml (generated per-run,
+      # written into ./config/ over SSH before `docker compose up`) because
+      # this PC's WiFi network blocks multicast between clients -- see the
+      # matching comment in tools/launch_all_sensors_docker.sh.
+      - CYCLONEDDS_URI=${CONTAINER_CYCLONEDDS_URI:-}
+    command: ["bash", "/start.sh"]

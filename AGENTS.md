@@ -78,7 +78,7 @@ Type `1` for ROS2 Foxy (recommended — matches the dock's Cyclone DDS config an
 Key facts:
 - Only `foxy` (ROS2) and `noetic` (ROS1) exist — **not Humble**.
 - Custom ROS2 workspace at `/unitree/module/graph_pid_ws/` (Hesai, Livox, SLAM, nav2, custom Unitree control packages).
-- **RealSense D435i**: the dock's native OS only ever had a ROS1/noetic driver (`ros-noetic-realsense2-camera` 2.3.2, `librealsense2` 2.50.0) — no ROS2/Foxy RealSense package exists, since Intel doesn't publish arm64 apt packages. **Resolved**: now runs as ROS2 Humble inside the `go2-realsense-humble` Docker container instead — see "RealSense on ROS2 Humble (resolved)" below.
+- **RealSense D435i**: the dock's native OS only ever had a ROS1/noetic driver (`ros-noetic-realsense2-camera` 2.3.2, `librealsense2` 2.50.0) — no ROS2/Foxy RealSense package exists, since Intel doesn't publish arm64 apt packages. **Resolved**: now runs as ROS2 Humble inside the `go2-sensors-humble` Docker container instead — see "RealSense on ROS2 Humble (resolved)" below.
 - **Hesai LiDAR**: ROS2-native driver also built for Foxy (`hesai_lidar_node` under `graph_pid_ws`), not launched by default on the dock's native OS. Also now rebuilt into the same Docker container above (same confirmed topic/output), launched via `docker compose` — see the same section below.
 - **Unitree built-in L1 LiDAR**: always-on, publishes standard `sensor_msgs/msg/PointCloud2` on `/utlidar/cloud` (~15 Hz, `frame_id: utlidar_lidar`) and `/utlidar/cloud_deskewed` — no custom message packages needed, works out of the box.
 
@@ -101,9 +101,17 @@ ros2 topic list
 
 Run these one-per-line or joined with `;` — **never with commas** (bash treats a comma-joined line as one malformed command and silently skips everything after the first token).
 
-### Isolated (domain 0 → 42) method via `domain_bridge`
+### Isolated (domain 0 → 42) method — REMOVED, everything now runs on domain 0
 
-Recommended for regular/permanent use so the PC's own ROS2 tools (RViz, rqt, shell experiments) don't pollute the robot's DDS domain 0 discovery. This is what `tools/launch_all_sensors_docker.sh` automates — see README.md's Launching section for the full walkthrough, and `tools/bridge_docker.yaml` / `tools/cyclone_domain0_enp3s0.xml` / `tools/cyclone_domain42_lo.xml` for the actual config.
+`launch_all_sensors_docker.sh` used to relay RealSense/Hesai topics from the
+robot's domain 0 onto an isolated domain 42 (via `domain_bridge`) so RViz2/PC
+tooling wouldn't share a DDS domain with the robot's own traffic. This was
+removed for simplicity: RViz2 now joins domain 0 directly (see
+`tools/launch_all_sensors_docker.sh`), same as the "Quick/direct DDS access"
+method above. `tools/bridge_docker.yaml` and `tools/cyclone_domain42_lo.xml`
+are gone; `tools/cyclone_domain0_enp3s0.xml` was replaced by
+`tools/cyclone_ethernet.xml` (single unscoped `<Domain id="0">` block, no
+dual-domain scoping needed anymore).
 
 ### Common shell pitfalls hit in this project (don't repeat)
 
@@ -111,6 +119,7 @@ Recommended for regular/permanent use so the PC's own ROS2 tools (RViz, rqt, she
 - `rmw_create_node: failed to create domain` → `CYCLONEDDS_URI` points at a Cyclone XML file that doesn't exist on this machine. `unset CYCLONEDDS_URI` or point it at a real file.
 - Running `rviz` (ROS1, if present) instead of `rviz2` (ROS2) — always use `rviz2` for this project.
 - `sudo apt-get install` failing with `Could not get lock /var/lib/dpkg/lock-frontend... held by unattended-upgr` → the automatic `apt.systemd.daily` upgrade is legitimately running (check `ps -p <pid>`); wait for it to finish naturally rather than killing it, especially if it's mid-upgrade of `dpkg`/`apt`/`libc-bin` themselves.
+- **Topic shows up in `ros2 topic list`/`topic info` but `ros2 topic hz`/subscribers get zero messages, and UFW is inactive** → check `RMW_IMPLEMENTATION` is actually exported as `rmw_cyclonedds_cpp` in that shell. The container (and this repo's tooling) all use CycloneDDS; a bare terminal with `RMW_IMPLEMENTATION` unset falls back to the default `rmw_fastrtps_cpp`, which can discover a CycloneDDS publisher's topic (cross-vendor RTPS discovery mostly works) but frequently fails to actually receive its data. Confirmed live (Sept 16): identical `ros2 topic hz /rslidar_points` got 0 messages with `RMW_IMPLEMENTATION` unset, ~7 Hz with it set to `rmw_cyclonedds_cpp` (plus `CYCLONEDDS_URI=file://tools/cyclone_ethernet.xml` and `ROS_DOMAIN_ID=0`) — same machine, same network link, only the RMW differed. Always source the same three env vars `launch_all_sensors_docker.sh` uses before running any manual `ros2` CLI command against this setup.
 
 ## Repo layout (`~/go2_guide_docs/`)
 
@@ -118,17 +127,16 @@ Recommended for regular/permanent use so the PC's own ROS2 tools (RViz, rqt, she
 README.md                                — high-level setup guide, current (Docker/Humble) approach
 networking.md                            — detailed connectivity: topology, credentials, Ethernet + WiFi setup, troubleshooting
 AGENTS.md                                — this file
-previous_approaches_and_build_history.md — deprecated ROS1/ros1_bridge approach + full go2-realsense-humble build debugging history
+previous_approaches_and_build_history.md — deprecated ROS1/ros1_bridge approach + full go2-sensors-humble build debugging history
 realsense_depth_stream_fix.md            — root-cause writeup for the OLD ROS1 driver's depth-stream USB failure (historical)
+wifi_dds_data_loss_findings.md           — experimental findings on --wifi mode's DDS data loss (item 7 below); what was tried, what's ruled out, what's still open
 go2_realsense_hesai_setup.pdf            — external reference doc
-realsense_humble_docker/                 — local mirror of ~/realsense_humble_docker/ on the dock, for version control (image must still be built ON the dock, arm64)
+go2_sensors_docker/                      — local mirror of ~/go2_sensors_docker/ on the dock, for version control (image must still be built ON the dock, arm64)
   Dockerfile, docker-compose.yml, start.sh, record_sensors_bag.sh, hesai_lidar_src/
 tools/
   go2_network_setup.sh                — scripted PC static-IP setup (nmcli persistent), ping check, UFW check/fix
-  cyclone_domain0_enp3s0.xml          — domain_bridge's Cyclone config only (it opens both domains 0+42 in one process) -- explicit <Domain id="0">/<Domain id="42"> blocks, --ethernet default; --wifi/-i generate an equivalent temp config. An unscoped <Domain> block here previously broke domain-42 bridging entirely -- see previous_approaches_and_build_history.md item 22.
-  cyclone_domain42_lo.xml             — isolated-bridge Cyclone config, RViz-facing side (domain 42 on loopback -- always, regardless of --ethernet/--wifi)
-  launch_all_sensors_docker.sh        — docker compose up -d on the dock (go2-realsense-humble, RealSense + Hesai as native ROS2 Humble, domain 0), domain_bridge (0 -> 42) + RViz2. --ethernet (default) or --wifi. L1 LiDAR deliberately not bridged (RealSense + Hesai only).
-  bridge_docker.yaml                  — domain_bridge whitelist for launch_all_sensors_docker.sh (RealSense color/depth/camera_info incl. compressed color + /rslidar_points; everything lives on domain 0 via the container's host networking)
+  cyclone_ethernet.xml                — CycloneDDS config for RViz2/ros2 CLI on domain 0 over the default Ethernet interface (enp3s0); --wifi/-i generate an equivalent temp config with a unicast discovery peer (see item 7)
+  launch_all_sensors_docker.sh        — docker compose up -d on the dock (go2-sensors-humble, RealSense + Hesai as native ROS2 Humble, domain 0) + RViz2 directly on domain 0 (no bridge). --ethernet (default) or --wifi. L1 LiDAR deliberately not otherwise touched (RealSense + Hesai only).
   go2_sensors_docker.rviz             — RViz2 layout for launch_all_sensors_docker.sh (Fixed Frame: rslidar; topic names match the container's doubled-namespace RealSense topics: /camera/camera/color/image_raw, /camera/camera/depth/image_rect_raw)
 ```
 
@@ -138,12 +146,12 @@ Note: the OLD ROS1/`ros1_bridge` approach's files (`tools/launch_all_sensors.sh`
 
 Decision: built `realsense-ros` + `librealsense2` from source inside a Docker container, rather than natively on the dock (which only has Foxy/Noetic) or via `ros1_bridge`.
 
-- Image: `go2-realsense-humble`, base `dustynv/ros:humble-desktop-l4t-r35.3.1`, built in `~/realsense_humble_docker/Dockerfile` on the dock.
+- Image: `go2-sensors-humble`, base `dustynv/ros:humble-desktop-l4t-r35.3.1`, built in `~/go2_sensors_docker/Dockerfile` on the dock.
 - `librealsense2` v2.58.4 built from source (`-DFORCE_RSUSB_BACKEND=true -DBUILD_WITH_CUDA=false`) — must be ≥2.58.0 to satisfy `realsense-ros`'s `ros2-master` branch version check.
 - `realsense-ros` (`ros2-master` branch), plus two extra from-source deps genuinely missing from this minimal-desktop base image: `diagnostic_updater` (`ros/diagnostics`, `ros2-humble` branch) and `xacro` (`ros/xacro`, `ros2` branch).
 - Key gotcha: this base image is Ubuntu 20.04 (focal), but official ROS2 Humble binaries only target 22.04 (jammy) — so **no `ros-humble-*` apt package exists for focal at all**, regardless of the (also expired) ROS apt signing key. The Dockerfile deletes the `packages.ros.org` apt source entirely rather than fixing/re-adding it, and treats `rosdep install` failures as non-fatal, relying on `colcon build` to surface genuinely missing dependencies.
 - Another gotcha: this base image's ROS underlay is at `/opt/ros/humble/install/setup.bash`, not `/opt/ros/humble/setup.bash` — sourcing the wrong path fails silently if chained after `rosdep init || true` (operator precedence swallows the error), leaving `colcon build` running with no ROS environment and confusing "package not found" CMake errors.
-- The Hesai driver (`hesai_lidar`) was later added to the same image, rebuilt from its vendored source (`realsense_humble_docker/hesai_lidar_src/`, not a git repo upstream) against Humble — required patching several undeclared dependencies (`tf2_ros`, `image_transport`, `pcl_conversions`, `rclcpp_components`) plus a missing `#include <tf2_ros/buffer.h>`. Confirmed topic: `/rslidar_points` (`sensor_msgs/msg/PointCloud2`, `frame_id: rslidar`, `publish_type:=both`) — same as the old native Foxy driver, so no config changes were needed elsewhere. Full chronological build log: `previous_approaches_and_build_history.md` Part 2.
+- The Hesai driver (`hesai_lidar`) was later added to the same image, rebuilt from its vendored source (`go2_sensors_docker/hesai_lidar_src/`, not a git repo upstream) against Humble — required patching several undeclared dependencies (`tf2_ros`, `image_transport`, `pcl_conversions`, `rclcpp_components`) plus a missing `#include <tf2_ros/buffer.h>`. Confirmed topic: `/rslidar_points` (`sensor_msgs/msg/PointCloud2`, `frame_id: rslidar`, `publish_type:=both`) — same as the old native Foxy driver, so no config changes were needed elsewhere. Full chronological build log: `previous_approaches_and_build_history.md` Part 2.
 - `tools/launch_all_sensors_docker.sh` + `tools/bridge_docker.yaml` + `tools/go2_sensors_docker.rviz` (the isolated-bridge config for this approach) are done and confirmed working end-to-end.
 
 ## Outstanding / next steps
@@ -179,17 +187,30 @@ Decision: built `realsense-ros` + `librealsense2` from source inside a Docker co
    loopback, used only locally between `domain_bridge` and `rviz2`) was
    actually bound to `enp3s0` — harmless in practice (same-host traffic works
    regardless of bound interface) but wrong; fixed to bind to `lo`.
-7. **`--wifi` mode's live RViz data doesn't work on the current WiFi network**
-   (SSH/`docker compose`/recording all work fine over it though) — confirmed
-   via a one-off DDS discovery probe (since removed as no longer needed) that
-   DDS multicast discovery doesn't reach across this WiFi network at all (0
-   participants found over WiFi vs. instant over Ethernet). Almost certainly
-   the router's AP/client isolation setting, not a script bug. User is
-   checking router admin settings rather than pursuing a unicast-peers
-   CycloneDDS workaround (rejected as too fragile, given both the
-   container's and PC's WiFi IPs are independently DHCP-assigned). Note:
-   that probe hardcoded domain 0 internally regardless
-   of `ROS_DOMAIN_ID` — can't be used to test domain 42 directly.
+7. **`--wifi` mode's live RViz data doesn't work well on the current WiFi
+   network** (SSH/`docker compose`/recording all work fine over it though).
+   The unicast `<Peer>`/`<ParticipantIndex>` workaround already in
+   `launch_all_sensors_docker.sh` does fix *discovery* (multicast SPDP is
+   blocked on this WiFi, confirmed instant on Ethernet vs. 0 participants
+   over WiFi without it) — but data flow is still bad even with discovery
+   working: small messages (`camera_info`) get through at only a fraction of
+   their real rate through the full bridge pipeline, and large messages
+   (raw depth, `/rslidar_points`, compressed color) are ~100% lost.
+   **`AllowMulticast=false` was tried live as a fix and is NOT the answer**
+   — setting it on the container side broke the RealSense/Hesai processes'
+   own intra-container discovery (they rely on the same local multicast).
+   Testing also showed small messages actually work fine (~24 Hz) when
+   subscribed to directly, bypassing `domain_bridge` entirely — meaning the
+   remaining small-message bottleneck is more likely in the bridge chain
+   itself (or was a transient measurement) than in raw multicast/link loss.
+   Large-message loss reproduces even fully direct with best-effort QoS
+   (ruling out `domain_bridge`/QoS-retry/discovery as the cause) and isn't
+   explained by MTU (1500 both sides) or raw large-packet ping loss (0%
+   at 200pps, 1400B, DF-set) — genuinely not yet root-caused. Full
+   experimental writeup, what was tried, and what's still open:
+   `wifi_dds_data_loss_findings.md`. No config changes were kept from this
+   investigation — `launch_all_sensors_docker.sh` and the generated
+   CycloneDDS configs are unchanged.
 8. **RESOLVED (Sept 14): `launch_all_sensors_docker.sh`'s cleanup trap was
    deleting the permanent `tools/cyclone_domain0_enp3s0.xml` on every single
    run** (in `--ethernet` mode, `$DOMAIN0_CONFIG` pointed straight at that
@@ -197,7 +218,25 @@ Decision: built `realsense-ros` + `librealsense2` from source inside a Docker co
    This is why the file kept mysteriously vanishing between sessions for
    days. Fixed by tracking whether the config is actually a generated temp
    file before deleting it.
-9. **RESOLVED (Sept 14): domain_bridge's domain-42 side was silently
+9. **KISS-ICP LiDAR odometry added, then DISABLED (built but not launched).**
+   `go2_sensors_docker/Dockerfile` clones `PRBonn/kiss-icp` v1.3.0 and
+   builds its `ros/` wrapper (package `kiss_icp`, executable `kiss_icp_node`)
+   via colcon, against the sibling `cpp/kiss_icp` core directly (a
+   `COLCON_IGNORE` there stops colcon from also treating it as a separate
+   plain-CMake package). `start.sh` has the launch invocation (against
+   `/rslidar_points`, `base_frame` unset -> egocentric in the `rslidar`
+   frame, `lidar_odom_frame:=odom_lidar`) commented out, along with its
+   overlay `source` line. `tools/bridge_docker.yaml`'s `/kiss/odometry`,
+   `/kiss/local_map`, `/kiss/frame`, `/kiss/keypoints`, `/tf` entries are
+   likewise commented out. **Real risk, not yet verified either way:** the
+   wrapper's CMake target requires `cxx_std_20`; this image's default
+   compiler is GCC 9 (focal), with only partial C++20 support. If `docker
+   build` fails on that step, install `gcc-10`/`g++-10` (in focal's default
+   repos already, no PPA) and set `CC`/`CXX` for just that `RUN` line. Also
+   needs the dock's WiFi internet uplink during the build (Sophus +
+   tsl-robin-map aren't apt-packaged for focal, so CMake `FetchContent`s
+   them). Full context in README.md's "LiDAR Odometry (KISS-ICP)" section.
+10. **RESOLVED (Sept 14): domain_bridge's domain-42 side was silently
    broken entirely** — an unscoped `<Domain>` block in
    `cyclone_domain0_enp3s0.xml` applied to *both* domains domain_bridge
    opens (it's the only process here that opens two), forcing its domain-42

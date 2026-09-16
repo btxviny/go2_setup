@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  Used by launch_all_sensors_docker.sh --ethernet (the default), passed as
+  CYCLONEDDS_URI to rviz2 directly -- there's no domain_bridge anymore,
+  RViz2 just joins the robot's own ROS_DOMAIN_ID=0 on this PC's real
+  Ethernet interface (enp3s0). For --wifi or a custom -i override, the
+  script generates an equivalent temp config with the actual interface name
+  (plus a unicast discovery peer for --wifi, since multicast SPDP doesn't
+  work on that network) instead of using this file.
+-->
+<CycloneDDS xmlns="https://cdds.io/config">
+  <Domain id="0">
+    <General>
+      <Interfaces>
+        <NetworkInterface name="enp3s0" />
+      </Interfaces>
+    </General>
+  </Domain>
+</CycloneDDS>

@@ -3,13 +3,14 @@
 # record_sensors_bag_pc.sh
 #
 # Runs ON THIS PC (not the dock). Records the same three core sensor topics
-# as realsense_humble_docker/record_sensors_bag.sh, but from the BRIDGED
-# domain 42 side -- i.e. it records whatever launch_all_sensors_docker.sh's
-# domain_bridge is currently relaying, not directly from the container.
+# as go2_sensors_docker/record_sensors_bag.sh, but directly from the
+# robot's own domain 0 -- i.e. whatever launch_all_sensors_docker.sh has
+# RViz2 (and this PC) currently subscribed to, not a bridged copy.
 #
-# Requires launch_all_sensors_docker.sh already running (domain_bridge up,
-# in turn requires the dock's go2-realsense-humble container up) -- this
-# script does NOT start that for you, and does NOT touch the dock at all.
+# Requires launch_all_sensors_docker.sh already running (the dock's
+# go2-sensors-humble container up, and this PC's DDS participant already
+# discovering it on domain 0) -- this script does NOT start that for you,
+# and does NOT touch the dock at all.
 #
 # Topics recorded (same three as the dock-side script, see its header for
 # the color-compressed / depth-raw rationale -- unchanged here):
@@ -40,16 +41,9 @@ TOPICS=(
 BAG_NAME="${1:-sensors_$(date -u +%Y%m%d_%H%M%S)}"
 BAG_DIR="$HOME/rosbags/$BAG_NAME"
 
-if ! pgrep -f "lib/domain_bridge/domain_bridge" >/dev/null; then
-  echo "ERROR: domain_bridge isn't running -- nothing to record from." >&2
-  echo "Start it first (in another terminal):" >&2
-  echo "  cd ~/go2_guide_docs/tools && ./launch_all_sensors_docker.sh" >&2
-  exit 1
-fi
-
 mkdir -p "$HOME/rosbags"
 
-echo "=== Recording rosbag (from bridged domain 42): $BAG_NAME ==="
+echo "=== Recording rosbag (from domain 0): $BAG_NAME ==="
 echo "Topics: ${TOPICS[*]}"
 echo "Saving to: $BAG_DIR"
 echo "Press Ctrl+C to stop recording."
@@ -59,8 +53,8 @@ set +u
 source /opt/ros/humble/setup.bash
 set -u
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-export CYCLONEDDS_URI="file://$SCRIPT_DIR/cyclone_domain42_lo.xml"
-export ROS_DOMAIN_ID=42
+export CYCLONEDDS_URI="file://$SCRIPT_DIR/cyclone_ethernet.xml"
+export ROS_DOMAIN_ID=0
 
 ros2 bag record -o "$BAG_DIR" "${TOPICS[@]}"
 

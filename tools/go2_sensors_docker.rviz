@@ -47,12 +47,12 @@ Visualization Manager:
       Min Intensity: 0
       Name: HesaiRslidarCloud
       Position Transformer: XYZ
-      Selectable: true
+      Selectable: false
       Size (Pixels): 3
-      Size (m): 0.03999999910593033
-      Style: Flat Squares
+      Size (m): 0.019999999552965164
+      Style: Squares
       Topic:
-        Depth: 5
+        Depth: 1
         Durability Policy: Volatile
         Filter size: 10
         History Policy: Keep Last
@@ -60,7 +60,7 @@ Visualization Manager:
         Value: /rslidar_points
       Use Fixed Frame: true
       Use rainbow: true
-      Value: true
+      Value: false
     - Class: rviz_default_plugins/Image
       Enabled: true
       Max Value: 1
@@ -95,6 +95,15 @@ Visualization Manager:
       Name: Axes
       Radius: 0.02999999932944775
       Reference Frame: <Fixed Frame>
+      Value: true
+    - Class: rviz_default_plugins/TF
+      Enabled: true
+      Frame Timeout: 15
+      Name: TF
+      Show Arrows: true
+      Show Axes: true
+      Show Names: true
+      Update Interval: 0
       Value: true
   Enabled: true
   Global Options:

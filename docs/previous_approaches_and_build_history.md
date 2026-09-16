@@ -1,14 +1,14 @@
 # Previous Approaches & Build History
 
 This doc exists so the reasoning behind the current setup (README.md,
-`realsense_humble_docker/`, `tools/launch_all_sensors_docker.sh`) isn't lost.
+`go2_sensors_docker/`, `tools/launch_all_sensors_docker.sh`) isn't lost.
 It covers two things, in order:
 
 1. **The approach used before this one** — native ROS1 RealSense driver +
    `ros1_bridge` + native ROS2/Foxy Hesai. Fully superseded, kept here for
    context only. Do not follow these steps for new setups.
 2. **The build history of the current Docker/Humble approach** — every real
-   bug hit getting `go2-realsense-humble` working, in the order they were
+   bug hit getting `go2-sensors-humble` working, in the order they were
    found, so a future session doesn't have to rediscover any of them.
 
 ---
@@ -99,7 +99,7 @@ are both native ROS2 Humble nodes in one container from the start.
 
 ---
 
-## Part 2: Building `go2-realsense-humble` — full debugging history
+## Part 2: Building `go2-sensors-humble` — full debugging history
 
 Base image: `dustynv/ros:humble-desktop-l4t-r35.3.1` (Jetson/L4T, Ubuntu 20.04
 focal, ROS2 Humble built from source since Humble was never released for
@@ -358,7 +358,7 @@ back to `unitree` afterward.
 ### 17. Rosbag playback showing live data instead of the recording
 The first version of the playback instructions (Section 10) didn't set
 `ROS_DOMAIN_ID` for either `ros2 bag play` or `rviz2`, leaving both on the
-default domain 0 -- the same domain the `go2-realsense-humble` container
+default domain 0 -- the same domain the `go2-sensors-humble` container
 broadcasts on network-wide (via `network_mode: host`) whenever it's running.
 Result: RViz subscribed to both the live container's publishers and the bag
 player's publishers on the same topic names at once, with no error or
@@ -410,7 +410,7 @@ hang case specifically, a foreground `rviz2 ...` as the script's last
 command meant bash was blocked inside that exec and could never reach the
 cleanup trap -- the bag player would be orphaned. Fixed by backgrounding
 *both* processes and using `wait -n "$PLAYER_PID" "$RVIZ_PID"`, matching the
-pattern already used in `realsense_humble_docker/start.sh` on the dock --
+pattern already used in `go2_sensors_docker/start.sh` on the dock --
 either process exiting (cleanly, hung-then-killed, or crashed) now reliably
 reaches the cleanup trap, which kills both (with a `kill` then `kill -9`
 grace-period fallback). Verified after the fix: intentionally triggered the

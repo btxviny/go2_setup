@@ -66,8 +66,57 @@ RUN cd /opt/realsense_ws && \
 # Force CycloneDDS as the RMW implementation inside the container
 ENV RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 
-# Source both the ROS underlay and the realsense-ros overlay on shell start
+# --- KISS-ICP LiDAR odometry (runs against /rslidar_points) ---
+# Upstream ships both the ROS 2 wrapper (ros/) and the C++ core (cpp/) in one
+# repo; ros/CMakeLists.txt builds directly against the sibling ../cpp/kiss_icp
+# sources when present (no re-fetching a release tarball), so we clone the
+# whole thing and let colcon discover the "kiss_icp" package at kiss-icp/ros/
+# on its own (a COLCON_IGNORE in cpp/ stops colcon from also trying to treat
+# the core as a second, separate plain-CMake package).
+#
+# Eigen3 and TBB come from apt (find_dependencies.cmake prefers system libs);
+# Sophus and tsl-robin-map aren't packaged for focal at all, so CMake's
+# FetchContent pulls small header-only checkouts of those two during
+# `colcon build` -- needs the dock's WiFi internet uplink at build time (see
+# AGENTS.md/networking.md), same as librealsense/realsense-ros's git clones
+# above.
+#
+# Gotcha to watch for: ros/CMakeLists.txt's odometry_component target
+# requests cxx_std_20. This base image's default compiler is GCC 9 (Ubuntu
+# 20.04 focal), which only has partial/experimental C++20 support under
+# -std=gnu++2a -- untested whether that's enough here (the wrapper source
+# itself doesn't appear to use any C++20-only language features, just C++17).
+# If this step fails with a C++20-related compiler error, install a newer
+# compiler (`apt install gcc-10 g++-10`, available in focal's default repos)
+# and set CC=gcc-10 CXX=g++-10 for just this RUN command rather than the
+# whole image.
+RUN apt update && apt install -y libeigen3-dev libtbb-dev && rm -rf /var/lib/apt/lists/*
+RUN mkdir -p /opt/kiss_icp_ws/src && cd /opt/kiss_icp_ws/src && \
+    git clone --depth 1 -b v1.3.0 https://github.com/PRBonn/kiss-icp.git && \
+    touch kiss-icp/cpp/COLCON_IGNORE
+
+# This base image's from-source tf2_ros only ships the old-style tf2_ros/*.h
+# headers (confirmed: no buffer.hpp/transform_broadcaster.hpp/etc. anywhere
+# under /opt/ros/humble) -- kiss-icp's ROS wrapper includes the newer *.hpp
+# names (a ROS 2 header-rename migration this from-source build predates).
+# Rather than rebuilding tf2_ros from source, drop tiny shim headers into the
+# ros package's own include/ dir (already on its include path via
+# ros/CMakeLists.txt's target_include_directories(... PRIVATE .../include),
+# which takes precedence over tf2_ros's own installed include dir).
+RUN mkdir -p /opt/kiss_icp_ws/src/kiss-icp/ros/include/tf2_ros && \
+    for h in buffer transform_broadcaster transform_listener static_transform_broadcaster; do \
+      printf '#pragma once\n#include "tf2_ros/%s.h"\n' "$h" \
+        > /opt/kiss_icp_ws/src/kiss-icp/ros/include/tf2_ros/$h.hpp; \
+    done
+
+RUN cd /opt/kiss_icp_ws && \
+    /bin/bash -c "source /opt/ros/humble/install/setup.bash && \
+    (rosdep install -i --from-path src --rosdistro humble -y || true) && \
+    colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release"
+
+# Source the ROS underlay and all overlays on shell start
 RUN echo "source /opt/ros/humble/install/setup.bash" >> /root/.bashrc && \
-    echo "source /opt/realsense_ws/install/setup.bash" >> /root/.bashrc
+    echo "source /opt/realsense_ws/install/setup.bash" >> /root/.bashrc && \
+    echo "source /opt/kiss_icp_ws/install/setup.bash" >> /root/.bashrc
 
 CMD ["bash"]

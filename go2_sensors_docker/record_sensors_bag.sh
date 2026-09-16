@@ -3,7 +3,7 @@
 # record_sensors_bag.sh
 #
 # Runs ON THE DOCK. Records the three core sensor topics from the running
-# go2-realsense-humble container to a rosbag2 bag, saved on the dock's own
+# go2-sensors-humble container to a rosbag2 bag, saved on the dock's own
 # filesystem at ~/rosbags/<name> (via the /rosbags bind mount added to
 # docker-compose.yml -- NOT lost when the container stops/is recreated).
 #
@@ -24,7 +24,7 @@
 # expecting that tradeoff.
 #
 # Usage (on the dock):
-#   cd ~/realsense_humble_docker
+#   cd ~/go2_sensors_docker
 #   ./record_sensors_bag.sh [bag_name]
 #
 #   bag_name   Optional. Defaults to a UTC timestamp, e.g. sensors_20260911_142530.
@@ -40,7 +40,7 @@
 #
 set -euo pipefail
 
-CONTAINER="go2-realsense-humble"
+CONTAINER="go2-sensors-humble"
 TOPICS=(
   /camera/camera/color/image_raw/compressed
   /camera/camera/depth/image_rect_raw
@@ -51,7 +51,7 @@ HOST_BAG_DIR="$HOME/rosbags/$BAG_NAME"
 
 if ! docker ps --filter "name=^${CONTAINER}\$" --filter status=running -q | grep -q .; then
   echo "ERROR: container '$CONTAINER' is not running. Start it first:" >&2
-  echo "  cd ~/realsense_humble_docker && docker compose up -d" >&2
+  echo "  cd ~/go2_sensors_docker && docker compose up -d" >&2
   exit 1
 fi
 

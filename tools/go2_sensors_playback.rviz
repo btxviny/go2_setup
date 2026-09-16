@@ -49,8 +49,8 @@ Visualization Manager:
       Position Transformer: XYZ
       Selectable: true
       Size (Pixels): 3
-      Size (m): 0.03999999910593033
-      Style: Flat Squares
+      Size (m): 0.019999999552965164
+      Style: Squares
       Topic:
         Depth: 5
         Durability Policy: Volatile

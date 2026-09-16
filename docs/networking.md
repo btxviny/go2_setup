@@ -83,36 +83,78 @@ Network connectivity (above) gets you a link to the dock, but that alone
 doesn't make ROS2 topics show up in RViz on this PC — that's a separate,
 DDS-level hop, worth understanding on its own:
 
-- **Domain 0 is the robot's own domain.** The Go2's built-in sensors/nodes
-  publish there, and the `go2-realsense-humble` container does too (it runs
-  with `network_mode: host` and `ROS_DOMAIN_ID=0`), so RealSense + Hesai
-  topics live on domain 0 alongside everything native to the robot.
-- **This PC's own ROS2 tools (RViz2, `ros2` CLI, rqt) run on an isolated
-  domain 42 instead of joining domain 0 directly.** Joining domain 0
-  directly works too (see `AGENTS.md`'s "Quick/direct DDS access" snippet,
-  useful for one-off debugging), but pollutes the robot's own domain 0
-  discovery with this PC's tools and is not how the regular launch scripts
-  operate.
-- **`domain_bridge`** (`ros-humble-domain-bridge`) is what connects the two:
-  a single local process on this PC that opens **two** DDS domain
-  participants at once — one on domain 0 (reaching the dock over
-  Ethernet/WiFi) and one on domain 42 (loopback only) — and relays exactly
-  the topics listed in `tools/bridge_docker.yaml` from the former to the
-  latter. Nothing from domain 0 reaches RViz except what's explicitly
-  whitelisted there.
-- Two separate Cyclone DDS config files drive this, because the two
-  participants need different network interfaces: `tools/cyclone_domain0_enp3s0.xml`
-  configures `domain_bridge` itself (`<Domain id="0">` bound to the real
-  Ethernet/WiFi interface, `<Domain id="42">` bound to `lo`); `tools/cyclone_domain42_lo.xml`
-  is for everything else on this PC that only ever needs domain 42 (RViz2,
-  `ros2 topic` CLI checks) — always loopback, regardless of `--ethernet` vs
-  `--wifi`. Each `<Domain>` block **must** carry its `id` attribute, or the
-  second domain silently stops being bridged at all — see the
-  troubleshooting entry below and `previous_approaches_and_build_history.md`
-  item 22 for the full story of that bug.
+- **Domain 0 is the robot's own domain, and everything now joins it
+  directly — no bridge, no isolated domain.** The Go2's built-in
+  sensors/nodes publish there, and the `go2-sensors-humble` container does
+  too (it runs with `network_mode: host` and `ROS_DOMAIN_ID=0`), so
+  RealSense + Hesai topics live on domain 0 alongside everything native to
+  the robot. This PC's own ROS2 tools (RViz2, `ros2` CLI, rqt) join that
+  same domain 0 directly instead of going through a bridge into an isolated
+  domain — simpler, at the cost of seeing the robot's own native topics
+  (`/api/*`, `/lowstate`, `/uslam/*`, etc.) alongside the sensor topics in
+  `ros2 topic list`.
+  (An earlier version of this setup used a `domain_bridge` process to relay
+  only a whitelisted set of topics onto an isolated domain 42, keeping this
+  PC's tools out of the robot's own domain 0 discovery. That was removed
+  for simplicity — see `previous_approaches_and_build_history.md` for how it
+  worked, if ever resurrected.)
+- **Both sides must use the same RMW implementation for data to actually
+  flow.** The container runs `RMW_IMPLEMENTATION=rmw_cyclonedds_cpp`
+  (CycloneDDS). If this PC's shell doesn't also export that, it silently
+  falls back to the default `rmw_fastrtps_cpp` — which can often still
+  *discover* a CycloneDDS publisher's topic (`ros2 topic list`/`topic info`
+  will show it — cross-vendor RTPS discovery mostly works) but then fails to
+  actually receive its data, with `ros2 topic hz`/subscribers getting zero
+  messages and no error anywhere. This is one of the most common ways this
+  setup silently "half-works" — see the required env vars below and
+  `AGENTS.md`'s "Common shell pitfalls" for a live-confirmed repro.
+- `tools/cyclone_ethernet.xml` is the CycloneDDS config used for the default
+  `--ethernet` mode, binding to this PC's real Ethernet interface
+  (`enp3s0`). `--wifi` (or a custom `-i IFACE`) generates an equivalent temp
+  config instead, plus a unicast discovery `<Peer>` pointed at the dock's
+  WiFi IP and an explicit `<ParticipantIndex>0</ParticipantIndex>` — needed
+  because this WiFi network blocks multicast SPDP discovery between
+  wireless clients (see the "Known limitation" caveat later in this doc, and
+  `wifi_dds_data_loss_findings.md` for the full investigation).
 - `tools/launch_all_sensors_docker.sh` automates the whole chain: brings the
-  container up on the dock, starts `domain_bridge` locally, and launches
-  RViz2 pointed at domain 42 — see `README.md`'s Launching section.
+  container up on the dock, and launches RViz2 directly on domain 0 with the
+  right RMW/env vars already set — see `README.md`'s Launching section. It's
+  the recommended way to do this rather than exporting the env vars
+  manually every time.
+
+### Manually running `ros2` CLI tools against this setup
+
+If you need a plain `ros2 topic echo`/`hz`/`list` (etc.) outside of
+`launch_all_sensors_docker.sh` — e.g. to debug while RViz2 is already
+running, or instead of launching RViz2 at all — export these first, in the
+**same shell** you run the command in:
+
+(PC)
+```bash
+source /opt/ros/humble/setup.bash
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export CYCLONEDDS_URI="file:///home/viny/go2_guide_docs/tools/cyclone_ethernet.xml"   # --ethernet
+export ROS_DOMAIN_ID=0
+ros2 topic hz /rslidar_points
+```
+
+For `--wifi`, point `CYCLONEDDS_URI` at the temp config
+`launch_all_sensors_docker.sh --wifi` generates (printed to the terminal
+when it starts, under `/tmp/cyclone_domain0_*.xml`) instead of
+`cyclone_ethernet.xml` — a plain Ethernet-bound config won't discover
+anything over WiFi.
+
+Skipping any of these three exports is the most common reason a manual
+`ros2` command "sees" a topic but gets no data, or sees nothing at all:
+
+| Symptom | Missing/wrong env var |
+|---|---|
+| Topic never appears in `ros2 topic list` at all | `ROS_DOMAIN_ID` (still on the default `0`... check it's not accidentally `42` or something else from an old shell) |
+| Topic appears, but `topic hz`/subscribers get 0 messages | `RMW_IMPLEMENTATION` not set to `rmw_cyclonedds_cpp` (defaults to `rmw_fastrtps_cpp`) |
+| `rmw_create_node: failed to create domain` | `CYCLONEDDS_URI` points at a file that doesn't exist on this machine — `unset CYCLONEDDS_URI` or fix the path |
+| Works on Ethernet, nothing over WiFi | `CYCLONEDDS_URI` still pointing at `cyclone_ethernet.xml` instead of the `--wifi`-generated temp config with the discovery peer |
+
+
 
 ## Connecting to the Dock
 
@@ -281,11 +323,23 @@ seconds.
   toggle if you hit this. Ethernet is
   unaffected and always works; recording and manual `docker`/`ssh` commands
   work over either link regardless, since they don't depend on DDS discovery.
-- **RViz shows nothing even over Ethernet, with no errors anywhere** — a
-  real bug hit and fixed once: `domain_bridge` (used by
-  `tools/launch_all_sensors_docker.sh`) opens two DDS domains in one
-  process, and its Cyclone config file needs each domain explicitly scoped
-  (`<Domain id="0">` / `<Domain id="42">`) or the second domain silently
-  never gets bridged. Already fixed in `tools/cyclone_domain0_enp3s0.xml` —
-  full root-cause writeup in `previous_approaches_and_build_history.md`
-  item 22, if this ever resurfaces after editing that file.
+- **RViz shows nothing even over Ethernet, with no errors anywhere** —
+  first check `RMW_IMPLEMENTATION` (see the table above); if that's already
+  right, historical note: an earlier version of this setup used
+  `domain_bridge` to relay topics from domain 0 onto an isolated domain 42,
+  and hit a real bug where its Cyclone config needed each domain explicitly
+  scoped (`<Domain id="0">` / `<Domain id="42">`) or the second domain
+  silently never got bridged — full root-cause writeup in
+  `previous_approaches_and_build_history.md` item 22. `domain_bridge` is no
+  longer used at all (everything runs on domain 0 directly now), so this
+  specific bug can't recur, but it's a good example of "silently half
+  works" DDS config failures in this project.
+- **Topic shows up in `ros2 topic list`/`topic info` but nothing is
+  received (`topic hz`, subscribers, RViz displays all show 0)** — almost
+  always `RMW_IMPLEMENTATION` not exported as `rmw_cyclonedds_cpp` in that
+  shell (see the manual-CLI section above). Confirmed live: identical
+  `ros2 topic hz /rslidar_points` got 0 messages with `RMW_IMPLEMENTATION`
+  unset (falls back to `rmw_fastrtps_cpp`), ~7 Hz with it set correctly —
+  same machine, same link, only the RMW differed. UFW is a separate known
+  cause of the exact same symptom (see `AGENTS.md`'s "Critical gotcha")
+  — check both if the env vars are already confirmed correct.

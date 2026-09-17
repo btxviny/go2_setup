@@ -120,18 +120,21 @@ discovery is working end to end)? Anything in
 
 `launch_all_sensors_docker.sh` sets the right environment for RViz2
 automatically, but a plain new terminal (e.g. for `ros2 topic echo/hz/list`
-while debugging) does not. Export these three first, **in that same
-shell**, or you'll get topics that "discover" but never actually receive
-data:
+while debugging) does not. **Source** (not run) `tools/ros2_env.sh` first,
+**in that same shell**, or you'll get topics that "discover" but never
+actually receive data:
 
 (PC)
 ```bash
-source /opt/ros/humble/setup.bash
-export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-export CYCLONEDDS_URI="file://$HOME/go2_guide_docs/tools/cyclone_ethernet.xml"   # --ethernet
-export ROS_DOMAIN_ID=0
+cd ~/go2_guide_docs/tools
+source ros2_env.sh   # --ethernet only; must be sourced, not executed
 ros2 topic hz /rslidar_points
 ```
+
+`ros2_env.sh` just wraps the three exports below (`source /opt/ros/humble/setup.bash`,
+`RMW_IMPLEMENTATION=rmw_cyclonedds_cpp`, `ROS_DOMAIN_ID=0`,
+`CYCLONEDDS_URI` pointed at `cyclone_ethernet.xml`) so you don't have to
+retype them every new terminal.
 
 For `--wifi`, point `CYCLONEDDS_URI` at the temp config
 `launch_all_sensors_docker.sh --wifi` generates instead (path printed to
@@ -287,6 +290,7 @@ realsense_depth_stream_fix.md            — root-cause writeup for the OLD ROS1
 go2_realsense_hesai_setup.pdf            — external reference doc
 go2_sensors_docker/
   Dockerfile, docker-compose.yml, start.sh   — builds/runs go2-sensors-humble (mirrors ~/go2_sensors_docker/ on the dock; also builds/launches KISS-ICP, see LiDAR Odometry section)
+  config/cyclonedds_ethernet.xml         — container-side CycloneDDS config (default CYCLONEDDS_URI in docker-compose.yml); caps MaxMessageSize/FragmentSize under the Ethernet MTU to avoid IP fragmentation (see AGENTS.md item 11)
   record_sensors_bag.sh                  — runs on the dock; records a rosbag2 bag under ~/rosbags
   hesai_lidar_src/                       — vendored Hesai driver source, patched to build against Humble
 tools/
@@ -294,6 +298,7 @@ tools/
   cyclone_ethernet.xml                — CycloneDDS config for RViz2 on domain 0 over the default Ethernet interface (enp3s0)
   launch_all_sensors_docker.sh        — docker compose up -d + RViz2 directly on domain 0, --ethernet (default) or --wifi
   go2_sensors_docker.rviz             — RViz2 layout for live viewing (Fixed Frame: rslidar)
+  ros2_env.sh                         — source (not run) to set RMW_IMPLEMENTATION/ROS_DOMAIN_ID/CYCLONEDDS_URI for manual ros2 CLI commands (--ethernet only)
   go2_sensors_playback.rviz           — RViz2 layout for rosbag playback (isolated ROS_DOMAIN_ID 99)
   play_and_visualize_bag.sh           — ros2 bag play + auto-launch RViz2
 ```

@@ -37,6 +37,22 @@
 # of this PC's own network interfaces RViz2's CycloneDDS binds to for
 # talking to the dock (auto-detected per mode, or overridden with -i IFACE).
 #
+# Both modes now use a plain, static, checked-in CycloneDDS config on both
+# ends (cyclone_ethernet.xml/cyclone_wifi.xml here, and the matching
+# go2_sensors_docker/config/cyclonedds_{ethernet,wifi}.xml on the dock) --
+# no per-run temp files, no IP resolution/generation. This used to generate
+# a unicast <Peer>/<ParticipantIndex> config for --wifi, working around an
+# assumed multicast block on this WiFi network -- a live bidirectional
+# multicast probe (Sept 2026) proved that assumption wrong (multicast SPDP
+# works fine both ways here), so that generation step was removed entirely.
+# See docs/networking.md for the full writeup, including why WiFi *data
+# throughput* for large messages is still a separate, unsolved problem even
+# though discovery was never actually broken.
+#
+# A custom -i IFACE (an interface name that doesn't match either static
+# file) still falls back to generating a minimal temp config -- just the
+# interface name, no peers/participant index needed anymore either.
+#
 # Confirmed topic names/types actually published by the container (verified via
 # `docker exec go2-sensors-humble ros2 topic list -t`):
 #   /rslidar_points                       [sensor_msgs/msg/PointCloud2]   (Hesai, publish_type=both)
@@ -46,11 +62,17 @@
 # camera_name=camera_namespace=camera behavior on this ros2-master branch.)
 #
 # Note: without domain_bridge there's no per-topic QoS override anymore --
-# RViz subscribes with whatever QoS each publisher actually uses (Reliable
-# by default). On --wifi this reintroduces the large-message stall risk that
-# forcing best_effort used to work around (see AGENTS.md item 7 /
-# wifi_dds_data_loss_findings.md) -- --wifi live visualization is not
-# expected to be reliable.
+# RViz subscribes with whatever QoS each publisher actually uses. The
+# HesaiRslidarCloud display in go2_sensors_docker.rviz is explicitly set to
+# Reliable QoS (matching the Hesai driver's own publisher) -- large
+# messages like /rslidar_points get fragmented into ~200 UDP packets sent
+# in a few-millisecond burst, and a Best Effort reader silently drops the
+# *entire* sample if even one fragment is lost in that burst (no retry
+# mechanism). Reliable lets the reader NACK and recover the missing
+# fragment(s) instead. See docs/networking.md's "Known issue" section for
+# the full root-cause writeup. This helps a lot over Ethernet; over WiFi,
+# throughput for large messages is still poor even with Reliable QoS
+# recovering some of them (see AGENTS.md item 7 / wifi_dds_data_loss_findings.md).
 #
 # Prerequisites (one-time, not handled by this script):
 #   1. SSH key-based auth to the dock:
@@ -58,8 +80,8 @@
 #   2. The go2-sensors-humble image built and ~/go2_sensors_docker/
 #      (Dockerfile, docker-compose.yml, start.sh) present on the dock -- see
 #      AGENTS.md "RealSense on ROS2 Humble (resolved)".
-#   3. tools/cyclone_ethernet.xml and go2_sensors_docker.rviz present
-#      (created alongside this script).
+#   3. tools/cyclone_ethernet.xml, tools/cyclone_wifi.xml, and
+#      go2_sensors_docker.rviz present (created alongside this script).
 #   4. ros-humble-image-transport-plugins installed on this PC (RViz's color
 #      display uses compressed transport -- see README.md Section 9).
 #
@@ -121,7 +143,7 @@ if ! ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-ne
   exit 1
 fi
 
-for f in cyclone_ethernet.xml go2_sensors_docker.rviz; do
+for f in cyclone_ethernet.xml cyclone_wifi.xml go2_sensors_docker.rviz; do
   if [[ ! -f "$SCRIPT_DIR/$f" ]]; then
     echo "ERROR: missing $SCRIPT_DIR/$f" >&2
     exit 1
@@ -142,16 +164,16 @@ echo "Sensors    : RealSense (color+depth) + Hesai PandarXT-16"
 echo "Container  : go2-sensors-humble (~/$COMPOSE_DIR)"
 echo
 
-# --- Cleanup (dock-side container + generated temp config) ---
+# --- Cleanup (dock-side container + generated temp config, if any) ---
 DOMAIN0_CONFIG=""
 DOMAIN0_CONFIG_IS_TEMP=""
 
 cleanup() {
   echo
   echo "=== Cleaning up ==="
-  # Only remove DOMAIN0_CONFIG if WE generated it as a temp file (--wifi or a
-  # custom -i). In the --ethernet default case it points at the permanent,
-  # git-tracked tools/cyclone_ethernet.xml.
+  # Only remove DOMAIN0_CONFIG if WE generated it as a temp file (a custom
+  # -i override not matching either static file). In the normal case it
+  # points at the permanent, git-tracked cyclone_ethernet.xml/cyclone_wifi.xml.
   if [[ -n "$DOMAIN0_CONFIG_IS_TEMP" && -f "$DOMAIN0_CONFIG" ]]; then
     rm -f "$DOMAIN0_CONFIG"
   fi
@@ -162,38 +184,14 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # --- 1. (Re)start the container fresh on the dock ---
-# --wifi: the container's CycloneDDS also needs a unicast peer pointed at
-# this PC, since multicast SPDP discovery doesn't work on this WiFi network
-# (AP/client isolation) -- otherwise its two DDS participants (RealSense +
-# Hesai) never see RViz2's participant on the PC. Generated fresh per run
-# since both IPs can change over DHCP.
-CONTAINER_CYCLONEDDS_URI_ENV=""
+# Selects the matching static container-side CycloneDDS config
+# (go2_sensors_docker/config/cyclonedds_ethernet.xml or cyclonedds_wifi.xml)
+# via CONTAINER_CYCLONEDDS_URI -- both are plain, single-interface, no
+# unicast peers needed (see the architecture comment above for why).
 if [[ "$MODE" == "wifi" ]]; then
-  PC_WIFI_IP="$(ip -4 -br addr show "$IFACE" 2>/dev/null | awk '{print $3}' | cut -d/ -f1)"
-  if [[ -n "$PC_WIFI_IP" ]]; then
-    echo "  This PC's WiFi IP ($IFACE): $PC_WIFI_IP -- writing it as a unicast discovery peer for the container"
-    ssh -o ConnectTimeout=5 "$DOCK_HOST" "mkdir -p ~/$COMPOSE_DIR/config && cat > ~/$COMPOSE_DIR/config/cyclonedds_wifi_discovery.xml" <<EOF
-<?xml version="1.0" encoding="UTF-8" ?>
-<CycloneDDS xmlns="https://cdds.io/config">
-  <Domain id="0">
-    <General>
-      <Interfaces>
-        <NetworkInterface name="wlan0" />
-      </Interfaces>
-    </General>
-    <Discovery>
-      <Peers>
-        <Peer address="$PC_WIFI_IP" />
-      </Peers>
-      <ParticipantIndex>auto</ParticipantIndex>
-    </Discovery>
-  </Domain>
-</CycloneDDS>
-EOF
-    CONTAINER_CYCLONEDDS_URI_ENV="CONTAINER_CYCLONEDDS_URI=file:///config/cyclonedds_wifi_discovery.xml "
-  else
-    echo "  WARNING: couldn't determine this PC's IP on $IFACE -- container will fall back to multicast-only discovery, which is known not to work on this WiFi network." >&2
-  fi
+  CONTAINER_CYCLONEDDS_URI_ENV="CONTAINER_CYCLONEDDS_URI=file:///config/cyclonedds_wifi.xml "
+else
+  CONTAINER_CYCLONEDDS_URI_ENV=""
 fi
 
 echo "[1/3] Starting go2-sensors-humble via docker compose on the dock..."
@@ -219,39 +217,19 @@ else
 fi
 
 # --- 3. RViz2 directly on domain 0 (no bridge) ---
-# The checked-in tools/cyclone_ethernet.xml only works for the default
-# --ethernet interface. For --wifi (or a custom -i override), generate a
-# temp config with the actual interface name, plus (for --wifi) a unicast
-# <Peers> entry pointing at the dock's WiFi IP and an explicit
-# <ParticipantIndex>0</ParticipantIndex> -- needed because this WiFi network
-# blocks multicast SPDP discovery between wireless clients (see AGENTS.md
-# item 7 / wifi_dds_data_loss_findings.md for the full story, including why
-# live data flow over --wifi is still unreliable even with discovery
-# working).
+# Picks the matching static PC-side config for the selected mode/interface.
+# A custom -i IFACE that doesn't match either default interface name falls
+# back to a minimal generated temp config (just the interface name -- no
+# peers/participant index needed).
 echo "[3/3] Launching RViz2 (ROS_DOMAIN_ID=0, $IFACE, RealSense + Hesai topics)..."
 if [[ "$MODE" == "ethernet" && "$IFACE" == "enp3s0" ]]; then
   DOMAIN0_CONFIG="$SCRIPT_DIR/cyclone_ethernet.xml"
+elif [[ "$MODE" == "wifi" && "$IFACE" == "wlp2s0" ]]; then
+  DOMAIN0_CONFIG="$SCRIPT_DIR/cyclone_wifi.xml"
 else
   DOMAIN0_CONFIG="$(mktemp /tmp/cyclone_domain0_XXXXXX.xml)"
   DOMAIN0_CONFIG_IS_TEMP=1
-
-  PEERS_BLOCK=""
-  if [[ "$MODE" == "wifi" ]]; then
-    DOCK_WIFI_IP="$(ssh -o ConnectTimeout=5 "$DOCK_HOST" "ip -4 -br addr show wlan0 | awk '{print \$3}' | cut -d/ -f1" 2>/dev/null)"
-    if [[ -n "$DOCK_WIFI_IP" ]]; then
-      echo "  Dock WiFi IP (resolved fresh via SSH): $DOCK_WIFI_IP -- adding as a unicast discovery peer"
-      PEERS_BLOCK="    <Discovery>
-      <Peers>
-        <Peer address=\"$DOCK_WIFI_IP\" />
-      </Peers>
-      <ParticipantIndex>0</ParticipantIndex>
-    </Discovery>
-"
-    else
-      echo "  WARNING: couldn't resolve the dock's WiFi IP via SSH -- falling back to multicast-only discovery, which is known not to work on this WiFi network." >&2
-    fi
-  fi
-
+  echo "  Custom interface ($IFACE) -- generating a minimal temp config for it"
   cat > "$DOMAIN0_CONFIG" <<EOF
 <?xml version="1.0" encoding="UTF-8" ?>
 <CycloneDDS xmlns="https://cdds.io/config">
@@ -260,18 +238,22 @@ else
       <Interfaces>
         <NetworkInterface name="$IFACE" />
       </Interfaces>
+      <MaxMessageSize>1400B</MaxMessageSize>
+      <FragmentSize>1300B</FragmentSize>
     </General>
-${PEERS_BLOCK}  </Domain>
+  </Domain>
 </CycloneDDS>
 EOF
 fi
 
+# Source the same env vars ros2_env.sh sets (single source of truth for
+# RMW_IMPLEMENTATION/ROS_DOMAIN_ID/CYCLONEDDS_URI), then override
+# CYCLONEDDS_URI to whichever static/generated config this run picked.
 set +u
-source /opt/ros/humble/setup.bash
+source "$SCRIPT_DIR/ros2_env.sh"
 set -u
-export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-CYCLONEDDS_URI="file://$DOMAIN0_CONFIG" \
-  ROS_DOMAIN_ID=0 \
-  rviz2 -d "$SCRIPT_DIR/go2_sensors_docker.rviz"
+export CYCLONEDDS_URI="file://$DOMAIN0_CONFIG"
+
+rviz2 -d "$SCRIPT_DIR/go2_sensors_docker.rviz"
 
 # When rviz2 exits (window closed), the trap fires automatically and cleans up.

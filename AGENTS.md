@@ -133,9 +133,11 @@ wifi_dds_data_loss_findings.md           — experimental findings on --wifi mod
 go2_realsense_hesai_setup.pdf            — external reference doc
 go2_sensors_docker/                      — local mirror of ~/go2_sensors_docker/ on the dock, for version control (image must still be built ON the dock, arm64)
   Dockerfile, docker-compose.yml, start.sh, record_sensors_bag.sh, hesai_lidar_src/
+  config/cyclonedds_ethernet.xml   — container-side CycloneDDS config (default CYCLONEDDS_URI), caps MaxMessageSize/FragmentSize under the Ethernet MTU (see item 11)
 tools/
   go2_network_setup.sh                — scripted PC static-IP setup (nmcli persistent), ping check, UFW check/fix
-  cyclone_ethernet.xml                — CycloneDDS config for RViz2/ros2 CLI on domain 0 over the default Ethernet interface (enp3s0); --wifi/-i generate an equivalent temp config with a unicast discovery peer (see item 7)
+  cyclone_ethernet.xml                — CycloneDDS config for RViz2/ros2 CLI on domain 0 over the default Ethernet interface (enp3s0), incl. a MinimumSocketReceiveBufferSize=10MB tuning; --wifi/-i generate an equivalent temp config with a unicast discovery peer (see item 7)
+  ros2_env.sh                         — source (not run) to set RMW_IMPLEMENTATION/ROS_DOMAIN_ID/CYCLONEDDS_URI for manual ros2 CLI commands, wraps the exports so they don't need retyping every terminal (--ethernet only; --wifi still needs the printed temp config path)
   launch_all_sensors_docker.sh        — docker compose up -d on the dock (go2-sensors-humble, RealSense + Hesai as native ROS2 Humble, domain 0) + RViz2 directly on domain 0 (no bridge). --ethernet (default) or --wifi. L1 LiDAR deliberately not otherwise touched (RealSense + Hesai only).
   go2_sensors_docker.rviz             — RViz2 layout for launch_all_sensors_docker.sh (Fixed Frame: rslidar; topic names match the container's doubled-namespace RealSense topics: /camera/camera/color/image_raw, /camera/camera/depth/image_rect_raw)
 ```
@@ -211,6 +213,31 @@ Decision: built `realsense-ros` + `librealsense2` from source inside a Docker co
    `wifi_dds_data_loss_findings.md`. No config changes were kept from this
    investigation — `launch_all_sensors_docker.sh` and the generated
    CycloneDDS configs are unchanged.
+
+   **Update/correction (Sept 2026):** the "multicast SPDP is blocked on
+   this WiFi" claim above was re-tested directly and found to be **wrong**
+   — a live bidirectional multicast probe (real UDP packets sent/received
+   on CycloneDDS's own SPDP group `239.255.0.1:7400` between the PC's and
+   dock's WiFi interfaces) confirmed multicast works fine both ways on this
+   network. The large-message throughput problem described above (raw
+   depth, `/rslidar_points`, compressed color loss) is real and still
+   unresolved, but it's not caused by blocked multicast/discovery — it's a
+   WiFi link-level bandwidth/loss issue for large messages, separate from
+   discovery entirely. Given this, the unicast `<Peer>`/`ParticipantIndex`
+   workaround (and its per-run IP-resolution/generation) was removed:
+   `--wifi` mode now uses two static, checked-in, plain-multicast configs
+   (`tools/cyclone_wifi.xml`, `go2_sensors_docker/config/cyclonedds_wifi.xml`)
+   with no per-run generation at all. Also found along the way: a single
+   config listing *both* interfaces (`eth0`+`wlan0`) on the container side
+   actively breaks data delivery (readers get zero messages, even though
+   discovery still works) — so the two static configs stay genuinely
+   separate rather than merged into one "works for everything" file. Also
+   separately confirmed (same session): the LiDAR/RealSense
+   "freezes-after-first-frame" symptom (both over Ethernet and WiFi) was
+   root-caused as a `BEST_EFFORT` QoS + large-message-fragmentation-burst
+   interaction, fixed by switching `HesaiRslidarCloud`'s RViz display QoS to
+   `RELIABLE` — see `docs/networking.md`'s "Known issue" and "WiFi
+   CycloneDDS config simplification" sections for the full writeup on both.
 8. **RESOLVED (Sept 14): `launch_all_sensors_docker.sh`'s cleanup trap was
    deleting the permanent `tools/cyclone_domain0_enp3s0.xml` on every single
    run** (in `--ethernet` mode, `$DOMAIN0_CONFIG` pointed straight at that
@@ -246,3 +273,36 @@ Decision: built `realsense-ros` + `librealsense2` from source inside a Docker co
    pub/sub sanity check) before finding it. Fixed with explicit
    `<Domain id="0">`/`<Domain id="42">` scoping. Full writeup:
    `previous_approaches_and_build_history.md` item 22.
+11. **RESOLVED (Sept 17): `/rslidar_points` (and raw RealSense images)
+   discovered fine but delivered ~0 messages over Ethernet — root cause was
+   CycloneDDS's own `MaxMessageSize` default (14720B, ~10x the real 1500B
+   Ethernet MTU).** Any message needing more than one DDSI fragment batched
+   up to that default gets sent as a single oversized UDP datagram that the
+   kernel then IP-fragments to fit the wire — losing any one of the ~9-10
+   resulting IP fragments loses the whole multi-MB sample. Confirmed via
+   `/proc/net/snmp` showing a ~50% `ReasmFails` rate under load, and
+   `tcpdump` showing genuine ~13-14KB UDP payloads (not a GRO artifact --
+   reproduced identically with GRO forced off via `ethtool -K enp3s0 gro
+   off`). Small messages (compressed color, small state topics) worked fine
+   throughout, since they never need fragmentation in the first place --
+   this is what made the symptom look LiDAR-specific at first, but raw
+   RealSense color (2.7MB/frame) failed identically once tested, while
+   depth raw (795KB/frame, fewer fragments) mostly got through. **Fix:**
+   cap `MaxMessageSize` (1400B) and `FragmentSize` (1300B) safely under the
+   MTU, on **both** the container/publisher side (new
+   `go2_sensors_docker/config/cyclonedds_ethernet.xml`, now the default
+   `CYCLONEDDS_URI` in `docker-compose.yml`; also added to the runtime
+   `--wifi` container config in `launch_all_sensors_docker.sh`) and the PC
+   /reader side (`tools/cyclone_ethernet.xml` and the script's generated
+   `--wifi`/custom-`-i` temp config), forcing CycloneDDS to always emit
+   single MTU-safe UDP datagrams and eliminating IP fragmentation entirely
+   for this traffic. Verified: `/rslidar_points` went from 0 messages
+   (indefinitely, discoverable but never received) to a solid ~10Hz, both
+   via a raw `rclpy` subscriber and visually in RViz2. Also note along the
+   way: `MinimumSocketReceiveBufferSize` and `Internal/FragmentSize` are
+   both deprecated/moved element names in the CycloneDDS version installed
+   here (0.10.5) -- current names are `Internal/SocketReceiveBufferSize`
+   (with a `min` attribute) and `General/FragmentSize` respectively; Cyclone
+   only warns (doesn't error) on the old names, so a config can silently not
+   do what you think it does. Always check `docker logs`/stderr for `config:
+   ... setting moved to ...` warnings after changing CycloneDDS XML.

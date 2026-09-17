@@ -313,16 +313,36 @@ seconds.
   via Ethernet) and that this PC supports mDNS resolution
   (`getent hosts ubuntu.local` — Ubuntu has this built in via `nss-mdns` by
   default). Fall back to the Ethernet-based IP lookup above if it's broken.
-- **Live RViz data doesn't arrive over WiFi, but SSH/`docker` work fine** —
-  this is a known limitation, not a bug: ROS2/DDS discovery needs multicast,
-  which many consumer WiFi routers block between wireless clients ("AP/client
-  isolation"). Confirmed on this project's own WiFi network using a one-off
-  DDS discovery probe (since removed as no longer needed; 0 external
-  participants found over WiFi in 10s, vs. instant over Ethernet) — check
-  your router's wireless settings for an "AP Isolation" / "Client Isolation"
-  toggle if you hit this. Ethernet is
-  unaffected and always works; recording and manual `docker`/`ssh` commands
-  work over either link regardless, since they don't depend on DDS discovery.
+- **Live RViz data doesn't arrive over WiFi (or arrives very slowly/laggy),
+  but SSH/`docker`/discovery all work fine** — **this is not an AP/client
+  isolation or multicast problem** (an earlier version of this doc claimed
+  it was — see "Correction" below for why that was wrong). It's a genuine
+  WiFi *data throughput* limitation for large messages
+  (`/rslidar_points`, raw RealSense color/depth): confirmed via direct
+  testing (Sept 2026) that even with discovery working perfectly and the
+  reader using `RELIABLE` QoS (recovering lost fragments via retransmission
+  — see the "Known issue" section above), actual throughput for these large
+  topics over this WiFi link is still only a handful of messages per
+  *tens of seconds*, vs. a solid ~10 Hz over Ethernet. Small messages
+  (compressed color, robot state topics) are largely unaffected. Ethernet
+  remains the only reliable link for live large-topic visualization;
+  recording and manual `docker`/`ssh` commands work fine over either link
+  regardless, since they don't depend on DDS discovery or large-message
+  throughput.
+
+  **Correction (Sept 2026):** this bullet previously claimed WiFi discovery
+  itself was broken due to "AP/client isolation" blocking multicast, based
+  on an early one-off discovery probe. A later, more careful live test —
+  sending/receiving real UDP packets on CycloneDDS's own SPDP multicast
+  group (`239.255.0.1:7400`) directly between the PC's and dock's WiFi
+  interfaces, in both directions — proved multicast works fine on this
+  network. The original probe's "0 participants" result was most likely
+  measuring something else (e.g. run before the `MaxMessageSize` fragmentation
+  fix, or during an unrelated misconfiguration) rather than an actual AP
+  isolation block. This is why `tools/cyclone_wifi.xml` and
+  `go2_sensors_docker/config/cyclonedds_wifi.xml` no longer generate a
+  per-run unicast `<Peer>`/`<ParticipantIndex>` config — see "WiFi CycloneDDS
+  config simplification" below.
 - **RViz shows nothing even over Ethernet, with no errors anywhere** —
   first check `RMW_IMPLEMENTATION` (see the table above); if that's already
   right, historical note: an earlier version of this setup used
@@ -343,3 +363,189 @@ seconds.
   same machine, same link, only the RMW differed. UFW is a separate known
   cause of the exact same symptom (see `AGENTS.md`'s "Critical gotcha")
   — check both if the env vars are already confirmed correct.
+- **Only the *large* topics (`/rslidar_points`, raw RealSense color/depth)
+  show 0 messages — small topics (compressed color, `camera_info`, robot
+  state topics) work fine, and `RMW_IMPLEMENTATION`/UFW are already
+  confirmed correct** — this is CycloneDDS's own `MaxMessageSize` default
+  (14720 B), which is ~10x the real 1500 B Ethernet MTU. Left at default,
+  any message needing more than one internal fragment gets sent as a single
+  oversized UDP datagram that the kernel then IP-fragments to fit the wire —
+  fragile for reliable delivery, since losing any single one of the ~9-10
+  resulting IP fragments loses the whole multi-MB sample. Confirmed
+  root-caused (Sept 2026) via `/proc/net/snmp` showing a ~50% `ReasmFails`
+  rate under load, and `tcpdump` showing genuine ~13-14KB UDP payloads (not
+  a GRO artifact — reproduced identically with GRO forced off via
+  `ethtool -K enp3s0 gro off`). **Fix already applied** in this repo: both
+  the container/publisher-side config
+  (`go2_sensors_docker/config/cyclonedds_ethernet.xml`, the default
+  `CYCLONEDDS_URI` in `docker-compose.yml`) and the PC/reader-side config
+  (`tools/cyclone_ethernet.xml`) cap `MaxMessageSize` (1400 B) and
+  `FragmentSize` (1300 B) safely under the MTU, forcing CycloneDDS to always
+  emit single, unfragmented, MTU-safe UDP datagrams. If you ever see this
+  symptom again (e.g. after regenerating a config from scratch), that's the
+  setting to check first — full write-up in `AGENTS.md` item 11.
+- **`ros2` CLI commands run in a plain terminal only ever show `/api/*` and
+  other robot-native topics, never `/rslidar_points`/`/camera/...`, even
+  though `launch_all_sensors_docker.sh` itself works fine** — check for a
+  **stale `ros2cli` daemon**. Any bare `ros2 ...` command (run without first
+  sourcing the three env vars — see the manual-CLI section above) silently
+  spawns a background `ros2-daemon` process
+  (`ros2cli.daemon.daemonize`) using whatever RMW/domain was active *at that
+  moment* — typically the default `rmw_fastrtps_cpp` on domain 0 if you
+  forgot to `source tools/ros2_env.sh` first. That daemon then keeps running
+  in the background and answers `ros2 topic list`/etc. for the rest of the
+  session regardless of what you `export` afterwards, because the CLI talks
+  to the existing daemon instead of spawning a fresh participant with your
+  new env vars. Fix: `ros2 daemon stop`, then re-run with the correct env
+  vars sourced. Confirmed live (Sept 2026): killing a stray
+  `rmw_fastrtps_cpp` daemon was what made `/rslidar_points` etc. actually
+  appear in `ros2 topic list` afterwards.
+- **`--wifi` mode's `rviz2` aborts immediately with `rtps_init: failed to
+  create unicast sockets for domain 0 participant index 0 (ports 7410,
+  7411)`** — `launch_all_sensors_docker.sh --wifi` hardcodes
+  `<ParticipantIndex>0</ParticipantIndex>` in the temp CycloneDDS config it
+  generates (needed so the dock's unicast `<Peer>` entry, which points at a
+  fixed port derived from participant index 0, can actually find this PC's
+  reader). This only works if nothing else on the PC already owns the fixed
+  RTPS discovery ports (7410/7411 for participant index 0 on domain 0).
+  The most common squatter is exactly the stale `ros2cli` daemon described
+  in the bullet above — it's a full DDS participant of its own and, if
+  already running when `rviz2` starts, will have already claimed those
+  ports. Fix: `ros2 daemon stop` before launching, same as above.
+
+## Known issue: LiDAR point cloud shows only the first frame, then freezes
+
+**Symptom:** `/rslidar_points` shows up fine in `ros2 topic list`/`topic
+info`, `RMW_IMPLEMENTATION`/UFW/`MaxMessageSize` are all already correct
+(see above), and RViz's `HesaiRslidarCloud` display renders exactly one
+point cloud when it first connects, then never updates again — while the
+RealSense color/depth displays keep updating normally in the same RViz
+session. A **fresh `ros2 topic hz /rslidar_points` or a brand-new `rclpy`
+subscriber gets *zero* messages, indefinitely** (confirmed live over both
+Ethernet and WiFi, for 85s+ continuous windows) — even though the topic is
+genuinely still being published at a steady ~10 Hz the entire time
+(confirmed via `docker exec ... ros2 topic hz /rslidar_points` run directly
+inside the container on the dock, bypassing the network entirely).
+
+**Root cause (confirmed Sept 2026, live packet capture):** each
+`/rslidar_points` message is large enough (hundreds of KB) that CycloneDDS
+splits it into on the order of ~200 fragments, sent back-to-back in a burst
+lasting only a few **milliseconds** (`tcpdump` on the PC showed ~200 UDP
+datagrams, each ~1384 B, arriving within a 3 ms window for a single sample).
+Something in that burst — kernel socket buffering, NIC handling, or the
+link itself — reliably drops at least one fragment out of every burst.
+
+With the reader subscribed at **`BEST_EFFORT`** QoS (RViz's `PointCloud2`
+display plugin's default), there is no mechanism to recover a dropped
+fragment — DDS just discards that entire sample and waits for the next one,
+which then loses a *different* fragment, and so on. In practice this means
+almost every sample gets silently discarded, forever, with **zero errors
+anywhere** — not in RViz, not in the CLI tools, not in the container logs.
+The single frame that does render is just the rare lucky sample whose
+fragments all happened to survive.
+
+Proven experimentally: switching a test subscriber's QoS from `BEST_EFFORT`
+to `RELIABLE` (matching the Hesai driver's own publisher QoS — `RELIABLE`,
+`KEEP_LAST` depth 1000) immediately started receiving real messages, because
+a `RELIABLE` reader NACKs the specific missing fragment(s) and the writer
+resends just those, letting the sample complete despite the burst loss.
+
+**Fix applied:** `tools/go2_sensors_docker.rviz`'s `HesaiRslidarCloud`
+display QoS override was changed from `Reliability Policy: Best Effort` to
+`Reliability Policy: Reliable` (and `Depth` bumped from 5 to 1000 to match
+the publisher). No changes needed on the publisher/container side — its QoS
+was already correct.
+
+**Why not just make the *publisher* `BEST_EFFORT` too, to keep both sides
+symmetric?** This would not help and would likely make things worse.
+Reliability policy determines whether a lost fragment can be recovered *at
+all* — it's not about which side is "at fault," and there's no such thing as
+"symmetric" fixing the underlying burst-loss problem here. With
+`BEST_EFFORT` on both ends (what this setup effectively had before, since a
+`BEST_EFFORT` reader against a `RELIABLE` writer behaves like `BEST_EFFORT`
+end-to-end anyway), every sample that loses so much as one fragment out of
+~200 is gone for good — which is exactly the bug being fixed. `RELIABLE`
+is what makes recovery possible; there's no equivalent "make it work" lever
+available if both sides give up on retransmission.
+
+If the (small) retransmission overhead this introduces ever becomes a
+concern, the more correct long-term fixes would be to make the bursts
+themselves less loss-prone rather than removing the recovery mechanism —
+e.g. downsampling the point cloud before publishing (fewer/smaller
+fragments per burst) or tuning kernel/NIC receive buffers further — but
+`RELIABLE` is the confirmed, working fix as of this writing.
+
+## WiFi CycloneDDS config simplification (Sept 2026): multicast works fine, so the unicast-peer hack was removed
+
+**Background:** `--wifi` mode used to generate a brand-new temporary
+CycloneDDS config on *every single run*, on both ends — a unicast
+`<Peer address="...">` pointing at the other side's current WiFi IP, plus
+an explicit `<ParticipantIndex>0</ParticipantIndex>`. This required an SSH
+round-trip each run just to ask the dock for its current `wlan0` IP. The
+justification (documented in this file and `AGENTS.md` for months) was that
+this WiFi network's AP blocks multicast between wireless clients ("AP/client
+isolation"), so plain multicast-based SPDP discovery (the same mechanism
+Ethernet mode relies on with zero special config) supposedly didn't work,
+and the unicast peer was a required workaround.
+
+**That assumption was wrong.** A direct, live test (Sept 2026) proved
+multicast works fine both ways on this network:
+
+```
+PC (wlp2s0, 192.168.1.135)  <---multicast 239.255.0.1:7400--->  dock (wlan0, 192.168.1.131)
+```
+A small Python script joined that exact multicast group/port (CycloneDDS's
+own SPDP group) on each side and sent test packets from the other — both
+directions received them cleanly, alongside plenty of *other* genuine DDS
+SPDP traffic from the robot's own participants that was already reaching
+both WiFi endpoints unprompted. Re-testing actual ROS2 discovery
+(`ros2 topic list`) with a **plain multicast-only config (no `<Peer>`, no
+`<ParticipantIndex>`)** on both the container and the PC confirmed topics
+discover instantly over WiFi, identically to Ethernet.
+
+**Conclusion:** the unicast-peer/participant-index generation was solving a
+problem that didn't actually exist on this network (or at least, doesn't
+anymore — hard to say in hindsight whether the original one-off probe that
+motivated it was flawed, or something else changed since). It never helped
+with the *actual* WiFi problem anyway (large-message throughput — see the
+troubleshooting bullet above), since that's a link-bandwidth/loss issue,
+not a discovery-layer one.
+
+### What changed
+
+- `tools/launch_all_sensors_docker.sh --wifi` no longer does any IP
+  resolution or per-run temp-file generation for the normal case. It just
+  points `CYCLONEDDS_URI` at two new **static, checked-in** config files:
+  - `tools/cyclone_wifi.xml` (PC side, binds `wlp2s0` only)
+  - `go2_sensors_docker/config/cyclonedds_wifi.xml` (dock/container side,
+    binds `wlan0` only, selected via `CONTAINER_CYCLONEDDS_URI`)
+- A custom `-i IFACE` that doesn't match either default interface name
+  still generates a minimal temp config (just the interface name — no
+  peers/participant index needed anymore either).
+- The old per-run-generated `cyclonedds_wifi_discovery.xml` (dock side) is
+  gone.
+
+### Why there still isn't *one* config file for both Ethernet and WiFi
+
+The natural next question: since neither side needs per-run IP baking
+anymore, why not go one step further and have a single static config that
+lists **both** interfaces (`eth0`+`wlan0`, or `enp3s0`+`wlp2s0`), so the
+exact same file works regardless of which link is actually connected?
+
+**Tested directly, and it doesn't work reliably — don't do this.** With
+the *container* (writer/publisher side) configured to bind both `eth0` and
+`wlan0` simultaneously, a PC subscribing over WiFi with `RELIABLE` QoS
+(the fix above) got **zero messages** over a 33-second window — down from
+already-working (if slow — a handful of messages per ~20-30s) when the
+container was configured with `wlan0` only. Discovery (`ros2 topic list`)
+still worked fine in the dual-interface case; only actual data delivery
+broke. The likely cause: CycloneDDS picks one locator/interface path per
+matched reader, and with two interfaces active it can end up choosing one
+that doesn't correspond to where the remote reader is actually reachable —
+silently, with no error anywhere, same as every other failure mode in this
+document.
+
+So the two static files stay genuinely separate (one interface each),
+selected per-mode by the script, rather than merged into one. This is a
+smaller, more honest simplification than "one file for everything" would
+have been, but it's the one that's actually been verified to work.

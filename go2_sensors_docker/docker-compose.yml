@@ -13,11 +13,16 @@ services:
     environment:
       - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
       - ROS_DOMAIN_ID=0   # matches the robot's DDS domain (see AGENTS.md) -- change if you want it isolated
-      # Empty by default (multicast discovery works fine on the robot's own
-      # Ethernet subnet). launch_all_sensors_docker.sh --wifi sets this to
-      # file:///config/cyclonedds_wifi_discovery.xml (generated per-run,
-      # written into ./config/ over SSH before `docker compose up`) because
-      # this PC's WiFi network blocks multicast between clients -- see the
-      # matching comment in tools/launch_all_sensors_docker.sh.
-      - CYCLONEDDS_URI=${CONTAINER_CYCLONEDDS_URI:-}
+      # Defaults to config/cyclonedds_ethernet.xml (pins eth0, caps
+      # MaxMessageSize/FragmentSize under the 1500B Ethernet MTU -- see that
+      # file's comment for why: CycloneDDS's own MaxMessageSize default is
+      # 14720B, ~10x the real MTU, causing IP fragmentation that's fragile
+      # for large messages like /rslidar_points and raw RealSense images).
+      # launch_all_sensors_docker.sh --wifi overrides this to the static,
+      # checked-in config/cyclonedds_wifi.xml (pins wlan0, same
+      # MaxMessageSize/FragmentSize tuning, plain multicast discovery -- no
+      # unicast peers needed; see that file's comment and
+      # docs/networking.md for why the earlier per-run-generated
+      # unicast-peer version turned out to be unnecessary).
+      - CYCLONEDDS_URI=${CONTAINER_CYCLONEDDS_URI:-file:///config/cyclonedds_ethernet.xml}
     command: ["bash", "/start.sh"]

@@ -1,21 +1,17 @@
 <?xml version="1.0" encoding="UTF-8" ?>
 <!--
-  Used by launch_all_sensors_docker.sh --ethernet (the default), passed as
-  CYCLONEDDS_URI to rviz2 directly.
+  Used by launch_all_sensors_docker.sh --wifi, passed as CYCLONEDDS_URI to
+  rviz2/manual ros2 CLI commands on this PC. 
 -->
 <CycloneDDS xmlns="https://cdds.io/config" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="https://cdds.io/config
 https://raw.githubusercontent.com/eclipse-cyclonedds/cyclonedds/master/etc/cyclonedds.xsd">
   <Domain id="0">
     <General>
       <Interfaces>
-        <NetworkInterface name="enp3s0" />
+        <NetworkInterface name="wlp2s0" />
       </Interfaces>
       <MaxMessageSize>1400B</MaxMessageSize>
       <FragmentSize>1300B</FragmentSize>
     </General>
-    <Internal>
-      <SocketReceiveBufferSize min="10MB" />
-    </Internal>
   </Domain>
 </CycloneDDS>
-                       

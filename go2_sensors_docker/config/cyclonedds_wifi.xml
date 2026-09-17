@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  Container-side (dock) CycloneDDS config for --wifi mode. 
+-->
+<CycloneDDS xmlns="https://cdds.io/config">
+  <Domain id="0">
+    <General>
+      <Interfaces>
+        <NetworkInterface name="wlan0" />
+      </Interfaces>
+      <MaxMessageSize>1400B</MaxMessageSize>
+      <FragmentSize>1300B</FragmentSize>
+    </General>
+  </Domain>
+</CycloneDDS>

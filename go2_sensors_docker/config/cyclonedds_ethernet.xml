@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  Container-side (dock) CycloneDDS config for the default --ethernet mode.
+  Mounted into go2-sensors-humble at /config (read-only) via docker-compose.yml
+  and used as the default CYCLONEDDS_URI (overridden only for --wifi, see
+  tools/launch_all_sensors_docker.sh).
+
+  MaxMessageSize is the critical setting here: CycloneDDS's own default
+  (14720 B) is nearly 10x the real Ethernet MTU (1500 B). Left at default,
+  large messages (RealSense raw color/depth images, the Hesai PandarXT-16's
+  /rslidar_points PointCloud2) get sent as oversized UDP datagrams that the
+  kernel then IP-fragments to fit the wire; fragile for reliable DDS
+  delivery (losing any single 1500B fragment loses the whole multi-MB
+  sample). Confirmed root cause (Sept 2026) of "RGB/depth show fine, LiDAR
+  never shows in RViz" symptom: /proc/net/snmp on the PC showed a ~50% IP
+  reassembly failure rate under load, and packet captures showed genuine
+  ~13-14KB UDP payloads needing ~9-10 real IP fragments each. Capping
+  MaxMessageSize (and FragmentSize, which controls DDSI-level sample
+  chunking) safely under the 1500B MTU forces CycloneDDS to always emit
+  single, unfragmented, MTU-safe UDP datagrams, eliminating IP
+  fragmentation/reassembly entirely for this traffic. Verified fix:
+  /rslidar_points went from 0 messages received (indefinitely) to a solid
+  ~10Hz.
+-->
+<CycloneDDS xmlns="https://cdds.io/config">
+  <Domain id="0">
+    <General>
+      <Interfaces>
+        <NetworkInterface name="eth0" />
+      </Interfaces>
+      <MaxMessageSize>1400B</MaxMessageSize>
+      <FragmentSize>1300B</FragmentSize>
+    </General>
+  </Domain>
+</CycloneDDS>
